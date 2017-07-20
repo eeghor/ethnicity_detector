@@ -1,2 +1,2 @@
-# ethnicity_detector
-Find the likeliest ethnicity by name
+# Ethnicity Detector
+Given someone's first and last names, figure out what is the likeliest ethnicity of this person.
