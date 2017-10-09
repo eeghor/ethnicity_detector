@@ -1,7 +1,7 @@
 
 # coding: utf-8
 
-# In[160]:
+# In[2]:
 
 
 import pandas as pd
@@ -14,9 +14,13 @@ from unidecode import unidecode
 from string import ascii_lowercase
 import sqlalchemy as sa
 import math
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import schedule
 
 
-# In[161]:
+# In[1]:
 
 
 class TableCollector(object):
@@ -60,15 +64,19 @@ class TableCollector(object):
                 FROM [DWSales].[dbo].[tbl_LotusCustomer]
                 where ([CustomerListID] = 2) and ([ModifiedDate] = '""" + self.TODAY + "')"
         
-        self.TODAYS_CUSTOMERS = pd.read_sql(pick_customers_qry, self.CONNECTION, dtype=str)
-        
-        self.IDS_IN_TABLE = set(pd.read_sql("SELECT [CustomerID] FROM dbo.CustomerEthnicities;", 
-                                            self.CONNECTION, dtype=str)["CustomerID"])    
+        self.TODAYS_CUSTOMERS = pd.read_sql(pick_customers_qry, self.CONNECTION)
+            
         return self
     
     def upload_ethnicities(self, df_ethn):
         
+        # first, when customeer ids are already in the ethnicity table?
+        self.IDS_IN_TABLE = set(pd.read_sql("SELECT [CustomerID] FROM dbo.CustomerEthnicities;", 
+                                            self.CONNECTION)["CustomerID"])
+        
+        # check: any customer ids that are among the new ones but somehow also sit in the ethnicity table?
         self.IDS_TO_UPDATE = self.IDS_IN_TABLE & set(df_ethn.CustomerID)
+        # new customer ids to be appended to the ethnicity table
         self.IDS_TO_APPEND = set(df_ethn.CustomerID) - self.IDS_TO_UPDATE
         # note: 'append': if table exists, insert data. Create if does not exist
         df_ethn.loc[df_ethn.CustomerID.isin(self.IDS_TO_APPEND), :].to_sql('dbo.CustomerEthnicities', 
@@ -78,18 +86,49 @@ class TableCollector(object):
             upd_dict = defaultdict(lambda: defaultdict(str))
             
             df_to_update = pd.read_sql("SELECT * FROM dbo.CustomerEthnicities where CustomerID in " + "(" + ",".join(self.IDS_TO_UPDATE) + ");", 
-                                            self.CONNECTION, dtype=str)
+                                            self.CONNECTION)
             
             for row in df_to_update.iterrows():
-                
-                available_ethnicities = set(row[1].Ethnicity.split("|"))
-                updated_ethnicities = "|".join(available_ethnicities | set(df_ethn.loc[df_ethn.CustomerID == row[1].CustomerID, "Ethnicity"].values[0].split("|")))
-                upd_dict[row[1].CustomerID] = {"Ethnicity": updated_ethnicities}
+                new_cust_id = row[1].CustomerID
+                # ethnicities already assigned to this customer
+                new_cust_ethnicities = set(row[1].Ethnicity.split("|"))
+                updated_ethnicities = "|".join(new_cust_ethnicities | set(df_ethn.loc[df_ethn.CustomerID == new_cust_id, "Ethnicity"].values[0].split("|")))
+                upd_dict[new_cust_id] = {"Ethnicity": updated_ethnicities}
             
             upd_df = pd.DataFrame.from_dict(upd_dict, orient='index').reset_index().rename(columns={"index": "CustomerID"})
             
             upd_df.loc[upd_df, :].to_sql('dbo.CustomerEthnicities', self.CONNECTION, if_exists='append')
-                   
+    
+    def __make_report_string(self, df_ethn):
+        
+        st = ''
+        
+        for k, v in Counter(df_ethn).most_comon(2):  # returns a list of tuples
+            st += "{}: {} ".format(k, v)
+            
+        return st
+    
+    def send_email(self, df_ethn):
+        
+        sender_email, sender_pwd, smtp_server, smpt_port = [line.split("=")[-1].strip() 
+                                    for line in open("config/email.cnf", "r").readlines() if line.strip()]
+        
+        msg = MIMEMultipart()   
+
+        body = df_ethn.to_html()
+        
+        msg['From'] = sender_email
+        msg['To'] = sender_email
+        msg['Subject'] = subject
+        
+        msg.attach(MIMEText(self.__make_report_string(df_ethn, 'html'))
+        msg.attach(MIMEText(body, 'html'))
+        
+        server = smtplib.SMTP(smtp_server, smpt_port)
+        mailServer.starttls()
+        mailServer.login(sender_email, sender_pwd)
+        server.sendmail(sender_email, sender_email, msg.as_string())
+        server.quit()
 
 
 # In[171]:
@@ -211,9 +250,16 @@ class EthnicityDetector(object):
 
 if __name__ == '__main__':
     
-    df = pd.read_csv("/Users/ik/Data/temp/sample_new_customer_names.csv")
-    ed = (EthnicityDetector(df, ["indian", "filipino", "japanese", "arabic", "italian"])
+    def job():
+        
+        df = pd.read_csv("/Users/ik/Data/temp/sample_new_customer_names.csv")
+        ed = (EthnicityDetector(df, ["indian", "filipino", "japanese", "arabic", "italian"])
                                                     .clean_input()).find_ethnicity_candidates().pick_ethnicity()
+    
+    schedule.every().monday.at('00:30').do(job)
+    
+    while True:
+        schedule.run_pending()
 
 
 # In[173]:
