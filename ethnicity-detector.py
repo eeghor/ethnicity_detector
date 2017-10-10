@@ -1,24 +1,24 @@
 import pandas as pd
 import json
 import sys
-import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from collections import defaultdict, Counter
 from unidecode import unidecode
 from string import ascii_lowercase
 import sqlalchemy as sa
-import math
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import schedule
+import pytz
 
 
 class TableCollector(object):
     
-    def __init__(self, driver='pyodbc'):
+    def __init__(self, driver='pyodbc', target_table='CustomerEthnicities'):
         
         self.DRIVER_NAME = driver
+        self.TARGET_TABLE = target_table
         
         assert self.DRIVER_NAME in ['pyodbc', 'pymssql'], "wrong driver name - choose pyodbc or pymssql"
         
@@ -72,7 +72,7 @@ class TableCollector(object):
     
     def upload_ethnicities(self, df_ethn):
          
-        self.IDS_IN_TABLE = set(pd.read_sql("SELECT [CustomerID] FROM dbo.CustomerEthnicities;", 
+        self.IDS_IN_TABLE = set(pd.read_sql("SELECT [CustomerID] FROM " + self.TARGET_TABLE + ";", 
                                             self._ENGINE)["CustomerID"])
         
         print("ids already in table: {}".format(len(self.IDS_IN_TABLE)))
@@ -87,7 +87,7 @@ class TableCollector(object):
         print(toappend)
 
         
-        toappend.to_sql('dbo.CustomerEthnicities', self._ENGINE, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
+        toappend.to_sql(self.TARGET_TABLE, self._ENGINE, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
             "Ethnicity": sa.types.String(length=2)})
 
         print("upload complete..")
@@ -96,7 +96,7 @@ class TableCollector(object):
             
             upd_dict = defaultdict(lambda: defaultdict(str))
 
-            df_to_update = pd.read_sql("SELECT * FROM dbo.CustomerEthnicities where CustomerID in " + "(" + ",".join(self.IDS_TO_UPDATE) + ");", 
+            df_to_update = pd.read_sql("SELECT * FROM " + self.TARGET_TABLE + "where CustomerID in " + "(" + ",".join(self.IDS_TO_UPDATE) + ");", 
                                             self._ENGINE)
             
             for row in df_to_update.iterrows():
@@ -107,17 +107,21 @@ class TableCollector(object):
                 upd_dict[new_cust_id] = {"Ethnicity": updated_ethnicities}
             
             upd_df = pd.DataFrame.from_dict(upd_dict, orient='index').reset_index().rename(columns={"index": "CustomerID"}) 
-            upd_df.loc[upd_df, :].to_sql('dbo.CustomerEthnicities', self._ENGINE, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
+            upd_df.loc[upd_df, :].to_sql(self.TARGET_TABLE, self._ENGINE, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
             "Ethnicity": sa.types.String(length=2)})
     
     def __make_report_string(self, df_ethn):
         
-        st = ["{} Ethnicities {}".format(['-'*6]*2)]
-        
-        for k, v in Counter(df_ethn["Ethnicity"]).items():  # returns a list of tuples
-            st.append( "{:>6}{}{:<6}".format(k, 19*' ', v))
-            
-        return "\r\n".join(st)
+        if len(df_ethn) > 0:	
+
+        	st = ["{} Ethnicities {}".format(['-'*6]*2)]
+        	
+        	for k, v in Counter(df_ethn["Ethnicity"]).items():  # returns a list of tuples
+        	    st.append( "{:>6}{}{:<6}".format(k, 19*' ', v))
+        	    
+        	return "\r\n".join(st)
+        else:
+        	return("No new ethnicities found today.")
     
     def send_email(self, df_ethn):
         
@@ -144,10 +148,6 @@ class TableCollector(object):
         print('sent')
         server.quit()
 
-
-# In[171]:
-
-
 class EthnicityDetector(object):
     
     def __init__(self, df, ethnicity_list):
@@ -164,7 +164,7 @@ class EthnicityDetector(object):
         self.deciders = {"arabic": "name_and_surname", "italian": "name_and_surname", 
                          "filipino": "name_and_surname", "indian": "surname",
                         "japanese": "name_and_surname"}
-        self.ethn_abbrs = {"arabic": "ar", "italian": "it", "filipino": "ph", "indian": "in", "japanese": "jp"}
+        # self.ethn_abbrs = {"arabic": "ar", "italian": "it", "filipino": "ph", "indian": "in", "japanese": "jp"}
         
         # make name and surname dictionaries by letter for required ethnicities
         self.names = defaultdict(lambda: defaultdict(set))
@@ -250,14 +250,13 @@ class EthnicityDetector(object):
                 elif self.deciders[ethnicity] == "name_and_surname":
                     if (ethnicity in row[1].s_ethn) and (ethnicity in row[1].n_ethn):
                         customer_ethnicities.append(ethnicity)
-            customer_ethnicities = [self.ethn_abbrs[e] for e in customer_ethnicities]
-            final_ethnicities[row[1].cust_id] = {"FullName": row[1].full_name, "Ethnicity" : "|".join(customer_ethnicities) if customer_ethnicities else None}
+            # customer_ethnicities = [self.ethn_abbrs[e] for e in customer_ethnicities]
+            final_ethnicities[row[1].cust_id] = {"FullName": row[1].full_name, "Ethnicity" : "|".join(customer_ethnicities) 
+            										if customer_ethnicities else None}
                     
         
         self._detected_ethnicities = pd.DataFrame.from_dict(final_ethnicities, orient='index').reset_index().rename(columns={"index": "CustomerID"}).dropna()
-        
-        print(Counter(self._detected_ethnicities["Ethnicity"]))
-        
+       
         return self
 
 
@@ -267,14 +266,10 @@ class EthnicityDetector(object):
 if __name__ == '__main__':
     
     tc  = TableCollector()
-    # ed = (EthnicityDetector(df, ["indian", "filipino", "japanese", "arabic", "italian"])
-    # df = tc.get_customers()
 
     def job():
         
         tc.connect()
-        print('connection: {}'.format(tc.CONNECTION))
-
         tc.get_customers()
 
         print(tc.TODAYS_CUSTOMERS.head())
@@ -292,10 +287,13 @@ if __name__ == '__main__':
              ed.find_ethnicity_candidates().pick_ethnicity()
              print(ed._detected_ethnicities.head())
              tc.send_email(ed._detected_ethnicities)
-             tc.connect()
+             # tc.connect()
              tc.upload_ethnicities(ed._detected_ethnicities)
-             tc.disconnect()
+             # tc.disconnect()
 
+    # JOB_TIME_SYDNEY = '12:00'
+
+    # JOB_TIME_UTC = pytz.utc.localize(time(*[int(p) for p in JOB_TIME_SYDNEY.split(":")]))
     schedule.every().monday.at('05:39').do(job)
     
     while True:
