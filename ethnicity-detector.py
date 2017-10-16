@@ -15,27 +15,36 @@ from email.mime.multipart import MIMEMultipart
 import schedule
 import time
 
+import pyodbc
+import pymssql
+
 
 class TableHandler(object):
     
-    def __init__(self, driver='pyodbc', src_conf_file = 'connection-loc.ini',
-            target_conf_file = 'connection.ini', 
-            src_table='[DWSales].[dbo].[tbl_LotusCustomer]', target_table='CustomerEthnicities'):
+    """
+    Class to connect to tables and get or upload stuff from/to tables
+    """
+    def __init__(self, src_conf_file = 'connection-loc.ini',
+                        target_conf_file = 'connection.ini', 
+                            src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
+                                target_table='CustomerEthnicities'):
         
-        self.DRIVER_NAME = driver
-        self.SRC_TABLE = src_table
+        self.SRC_TABLE = src_table    # normally [DWSales].[dbo].[tbl_LotusCustomer]
         self.TARGET_TABLE = target_table
         self.SRC_CONF_FILE = src_conf_file
         self.TARGET_CONF_FILE = target_conf_file
-        
-        assert self.DRIVER_NAME in ['pyodbc', 'pymssql'], "wrong driver name - choose pyodbc or pymssql"
-            
-    def  _push_to_sql(self, df, tar, eng):
-       
-        df.to_sql(tar, eng, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
-                                                                              "Ethnicity": sa.types.String(length=50)}, schema="TEGA.dbo")
 
-    def connect(self, src_or_target='src'):
+        self.qry_parts = {"CRMOD_TIME": lambda BETWEEN_EXPR: """((([ModifiedDate] >= [CreatedDate]) and ([ModifiedDate] {})) 
+                                                                or ([CreatedDate] {}))""".format(*[BETWEEN_EXPR]*2),
+                                                                "CUST_LIST": lambda LIST_NUMBER: "([CustomerListID] = {})".format(LIST_NUMBER)}
+ 
+    # wrapper around pandas' to_sql
+    def  _push_to_sql(self, df, tart_name, eng):
+       
+        df.to_sql(tart_name, eng, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
+                                                                            "Ethnicity": sa.types.String(length=50)}, schema="TEGA.dbo")
+
+    def connect(self, src_or_target='src', driver='pymssql'):
         
         CONF_FILE = self.SRC_CONF_FILE if src_or_target == 'src' else self.TARGET_CONF_FILE
         
@@ -43,24 +52,25 @@ class TableHandler(object):
             self.SERVER, self.USER, self.PORT, self.PWD, self.DRIVER, self.DB_NAME = [line.split("=")[-1].strip() 
                     for line in open("config/" + CONF_FILE, 'r').readlines() if line.strip()]
         except:
-            print("problem with configuration file,  exiting..")
+            print("[ERROR]: PROBLEM WITH CONFIGURATION FILE,  EXITING..")
             sys.exit(0)
-
-        self.CONNSTR = 'mssql+{}://{}:{}@{}:{}/{}'.format(self.DRIVER_NAME, self.USER, self.PWD, 
-                                                          self.SERVER, self.PORT, self.DB_NAME)
         
-        if self.DRIVER_NAME == 'pyodbc':
-            import pyodbc
-            self.CONNSTR = 'mssql+{}://{}/{}'.format(self.DRIVER_NAME, self.SERVER, self.DB_NAME)
-
-            self.CONNSTR += '?driver=' + self.DRIVER
-        elif self.DRIVER_NAME == 'pymssql':
-            import pymssql
+        if (src_or_target == 'src') and (driver == 'pyodbc'):
+            print("[ERROR]: PYODBC DOESN\'T WORK WITH LOCAL SERVER,  EXITING..")
+            sys.exit(0)
+        elif (src_or_target == 'src') and (driver == 'pymssql'):
+            self.CONNSTR = 'mssql+{}://{}/{}'.format(driver, self.SERVER, self.DB_NAME)
+        elif (src_or_target == 'tar') and (driver == 'pyodbc'):
+            self.CONNSTR = 'mssql+{}://{}:{}@{}:{}/{}?driver={}'.format(driver, self.USER, self.PWD, 
+                                                          self.SERVER, self.PORT, self.DB_NAME, self.DRIVER)
+        elif (src_or_target == 'tar') and (driver == 'pymssql'):
+            self.CONNSTR = 'mssql+{}://{}:{}@{}:{}'.format(driver, self.USER, self.PWD, 
+                                                          self.SERVER, self.PORT, self.DB_NAME)
             
         try:
             self._ENGINE = sa.create_engine(self.CONNSTR)
         except:
-            print('can\'t create engine, exiting..')
+            print('[ERROR]: CAN\'T CREATE ENGINE, EXITING..')
             sys.exit(0)
 
         self._CONNECTION = self._ENGINE.connect()
@@ -74,86 +84,88 @@ class TableHandler(object):
 
         self._CONNECTION.close()
         print('disconnected from {}'.format(self.SERVER))
-    
 
-    def get_customers(self, mx_chunk=100000):
-        
-        self.TODAY = (datetime.now() + timedelta(days=-1)).strftime("%Y%m%d")
 
-        self.TODAY = '20140101'
-        # how many rows are there in the Lotus table?
-        nrows_qry = "SELECT COUNT (*) FROM " + self.SRC_TABLE + """ WHERE ([CustomerListID] = 2)
-                             and ((([ModifiedDate] >= [CreatedDate]) and
-                             ([ModifiedDate] <= '""" + self.TODAY + "')) or ([CreatedDate] <= '" + self.TODAY + "'));"
+    def get_customers(self, MAX_CHUNK_SIZE=100000):
         
-        NROWS_SRC = self._CONNECTION.execute(nrows_qry).fetchone()[0]
-        print('there are {} rows of interest in the source table'.format(NROWS_SRC))
         
-        if NROWS_SRC > mx_chunk:
+        self.TODAYS_CUSTOMERS = pd.DataFrame()
+
+        # sql query for 'last 7 days' time span
+        self.LAST_SEVEN_DAYS = " ".join('BETWEEN', "'" + (datetime.now() + timedelta(days=-6)).strftime("%Y%m%d") + "'", 'AND', "'" + datetime.now().strftime("%Y%m%d") + "'")
+
+        # how many customer ids are in the source table that we should be interested in
+        NROWS_SRC = self._CONNECTION.execute("SELECT COUNT (*) FROM " + self.SRC_TABLE +  "WHERE " +  self.qry_parts["CUST_LIST"](2) + " AND " + 
+                             self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS)).fetchone()[0]
+
+        print('there are {} rows in {}'.format(NROWS_SRC, self.SRC_TABLE))
+        
+        # download "new" customer ids
+        if NROWS_SRC > MAX_CHUNK_SIZE:
             
-            print('need to get customer data by chunks')
-
-            cids_qry = "SELECT DISTINCT CustomerID FROM " + self.SRC_TABLE + """ WHERE
-              ([CustomerListID] = 2) and ((([ModifiedDate] >= [CreatedDate]) and  ([ModifiedDate] <='""" + self.TODAY + "') or ([CreatedDate] <='" + self.TODAY + "'));"
-
-            CIDS_SRC = sorted([row["CustomerID"] for row in self._CONNECTION.execute(cids_qry)])
+            CIDS_SRC = sorted([row["CustomerID"] for row in self._CONNECTION.execute("SELECT DISTINCT CustomerID FROM " + self.SRC_TABLE +  "WHERE " +  self.qry_parts["CUST_LIST"](2) + " AND " + 
+                             self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS))])
             
-            nchunks = NROWS_SRC if NROWS_SRC%mx_chunk == 0 else NROWS_SRC//mx_chunk + 1
-
-            print('there will be {} chunks {} rows each'.format(nchunks, mx_chunk))
-
+            nchunks = NROWS_SRC if NROWS_SRC%MAX_CHUNK_SIZE == 0 else NROWS_SRC//MAX_CHUNK_SIZE + 1
+            
             for ch in range(nchunks):
                 
-                print('processing chunk {}..'.format(ch + 1))
+                print('uploading customer id chunk {} to {}..'.format(ch + 1, '#TempIdTable'))
                 # create a temporary table with the customer ids to update
                 pd.DataFrame({"CustomerID": [cid for cid in
-                    CIDS_SRC[ch*mx_chunk:(ch+1)*mx_chunk]]}).to_sql('#TempIdTable' + str(ch), self._ENGINE, if_exists="replace", dtype={"CustomerID":  sa.types.String(length=20)}, schema='TEGA.dbo')
-                #df_to_update = pd.read_sql("SELECT * FROM " + self.TARGET_TABLE + " where CustomerID in (SELECT CustomerID FROM #TempIdTable);", self._ENGINE)
-
-
-        # get customer IDS from Lotus
-        pick_customers_qry = """
-                SELECT [CustomerID] as [cust_id],
-                RTRIM(LTRIM(LOWER(ISNULL([FirstName],'')))) + ' ' +
-                RTRIM(LTRIM(LOWER(ISNULL([MiddleName],'')))) + ' ' +
-                RTRIM(LTRIM(LOWER(ISNULL([LastName],'')))) as [full_name]
-                FROM """ + self.SRC_TABLE + """ where ([CustomerListID] = 2)
-                and ( (([ModifiedDate] >= [CreatedDate]) and ([ModifiedDate] <= 
-                '""" + self.TODAY + """')) or ([CreatedDate] <=
-                '""" + self.TODAY + """'));
-                """
-        
-        # cust_id | full_name
-        self.TODAYS_CUSTOMERS = pd.read_sql(pick_customers_qry, self._ENGINE)
-        # note: can be either engine or connection, i.e. SQLAlchemy connectable
+                    CIDS_SRC[ch*MAX_CHUNK_SIZE:(ch+1)*MAX_CHUNK_SIZE]]}).to_sql('#TempIdTable', s
+                    elf._ENGINE, if_exists="replace", dtype={"CustomerID":  sa.types.String(length=20)}, schema='TEGA.dbo')
+                
+                self.TODAYS_CUSTOMERS = pd.concat([self.TODAYS_CUSTOMERS, 
+                                    pd.read_sql("SELECT [CustomerID] as [cust_id],"
+                                    "RTRIM(LTRIM(LOWER( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') ))) as [full_name] "
+                                    "FROM #TempIdTable WHERE " + self.qry_parts["CUST_LIST"](2) + " AND " + 
+                                        self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS) + ")))", self._ENGINE)])
+        else:
+            self.TODAYS_CUSTOMERS = pd.read_sql("SELECT [CustomerID] as [cust_id],"
+                                    "RTRIM(LTRIM(LOWER( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') ))) as [full_name] "
+                                    "FROM " + self.SRC_TABLE + " WHERE " + self.qry_parts["CUST_LIST"](2) + " AND " + 
+                                        self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS) + ")))", self._ENGINE)
+   
+            # note: can be either engine or connection, i.e. SQLAlchemy connectable
     
-        print("collected {} ({} unique) customer ids from table {}".format(len(self.TODAYS_CUSTOMERS),
-                    len(self.TODAYS_CUSTOMERS["cust_id"].unique()),self.SRC_TABLE))
+        print("collected {} customer ids from table {}".format(len(self.TODAYS_CUSTOMERS), self.SRC_TABLE))
             
         return self
     
     def upload_ethnicities(self, df_ethn):
          
-        # what customer ids are already in the ethnicity table?
+        """
 
+        IN: df_ethn - data frame with newly detected customer ethnicities
+        OUT: nothing
+
+        Upload df_ethn to the ethnicity table; if some customer ids are already there possibly with different ethnicities assigned, 
+        OVERWHITE
+
+        """
+
+        # get customer ids (as strings) that are already in the ethnicity table
         try:
             self.IDS_IN_TABLE = set(pd.read_sql("SELECT [CustomerID] FROM " + self.TARGET_TABLE + ";", 
                                             self._ENGINE)["CustomerID"].astype(str))
         except:
-            
-            self.IDS_IN_TABLE = set()
+             self.IDS_IN_TABLE = set()
         
         print('unique customer ids already in the ethnicity table {}: {}'.format(self.TARGET_TABLE, len(self.IDS_IN_TABLE)))
 
-        # check: any customer ids that are among the new ones but somehow also sit in the ethnicity table?
+        # any customer ids that are among the new ones but somehow also sit in the ethnicity table? for information only
 
         self.IDS_TO_UPDATE = self.IDS_IN_TABLE & set(df_ethn.CustomerID)
-        print("-- customer ids to update: {}".format(len(self.IDS_TO_UPDATE)))
+        print("customer ids to update: {}".format(len(self.IDS_TO_UPDATE)))
+        
         # new customer ids to be appended to the ethnicity table
         self.IDS_TO_APPEND = set(df_ethn.CustomerID) - self.IDS_TO_UPDATE
         print("-- customer ids to append: {}".format(len(self.IDS_TO_APPEND)))
         # note: 'append': if table exists, insert data. Create if does not exist
+        
         if self.IDS_TO_APPEND:
+            
             print("appending new ethnicities to table {}...".format(self.TARGET_TABLE), end='')
             self._push_to_sql(df_ethn.loc[df_ethn.CustomerID.isin(self.IDS_TO_APPEND),['CustomerID',
                 'Ethnicity']], self.TARGET_TABLE, self._ENGINE)
@@ -210,7 +222,7 @@ class TableHandler(object):
         
         msg['From'] = sender_email
         msg['To'] = ','.join([sender_email])
-        msg['Subject'] = 'update on ethnicities: customers modified on {}'.format(self.TODAY)
+        msg['Subject'] = 'update on ethnicities: customers modified on {}'.format(self.LAST_SEVEN_DAYS)
         
         dsample = pd.DataFrame()
 
