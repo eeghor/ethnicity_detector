@@ -15,7 +15,7 @@ from email.mime.multipart import MIMEMultipart
 import schedule
 import time
 
-import pyodbc
+#import pyodbc
 import pymssql
 
 
@@ -33,18 +33,27 @@ class TableHandler(object):
         self.TARGET_TABLE = target_table
         self.SRC_CONF_FILE = src_conf_file
         self.TARGET_CONF_FILE = target_conf_file
-
-        self.qry_parts = {"CRMOD_TIME": lambda BETWEEN_EXPR: """((([ModifiedDate] >= [CreatedDate]) and ([ModifiedDate] {})) 
-                                                                or ([CreatedDate] {}))""".format(*[BETWEEN_EXPR]*2),
-                                                                "CUST_LIST": lambda LIST_NUMBER: "([CustomerListID] = {})".format(LIST_NUMBER)}
+        self.LAST_SEVEN_DAYS = " ".join(['BETWEEN', "'" + (datetime.now() + timedelta(days=-6)).strftime("%Y%m%d") + "'", "AND", "'" +
+        datetime.now().strftime("%Y%m%d") + "'"])
+        
+        self.qopts = {"last_7_days": """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] {}))
+                    OR ([CreatedDate] {}) ) AND ([CustomerListID] =
+                    2)""".format(*[self.LAST_SEVEN_DAYS]*2), "before_today":
+                    """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate]
+                    <= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] =
+                    2)""".format(*["'" + (datetime.now() +
+                        timedelta(days=-1)).strftime("%Y%m%d") + "'"]*2)}
  
     # wrapper around pandas' to_sql
     def  _push_to_sql(self, df, tart_name, eng):
        
         df.to_sql(tart_name, eng, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
-                                                                            "Ethnicity": sa.types.String(length=50)}, schema="TEGA.dbo")
+                                                                            "Ethnicity":
+                                                                            sa.types.String(length=50)},
+                                                                            schema="TEGA.dbo",
+                                                                            chunksize=200000)
 
-    def connect(self, src_or_target='src', driver='pymssql'):
+    def connect(self, src_or_target='src'):
         
         CONF_FILE = self.SRC_CONF_FILE if src_or_target == 'src' else self.TARGET_CONF_FILE
         
@@ -55,18 +64,9 @@ class TableHandler(object):
             print("[ERROR]: PROBLEM WITH CONFIGURATION FILE,  EXITING..")
             sys.exit(0)
         
-        if (src_or_target == 'src') and (driver == 'pyodbc'):
-            print("[ERROR]: PYODBC DOESN\'T WORK WITH LOCAL SERVER,  EXITING..")
-            sys.exit(0)
-        elif (src_or_target == 'src') and (driver == 'pymssql'):
-            self.CONNSTR = 'mssql+{}://{}/{}'.format(driver, self.SERVER, self.DB_NAME)
-        elif (src_or_target == 'tar') and (driver == 'pyodbc'):
-            self.CONNSTR = 'mssql+{}://{}:{}@{}:{}/{}?driver={}'.format(driver, self.USER, self.PWD, 
-                                                          self.SERVER, self.PORT, self.DB_NAME, self.DRIVER)
-        elif (src_or_target == 'tar') and (driver == 'pymssql'):
-            self.CONNSTR = 'mssql+{}://{}:{}@{}:{}'.format(driver, self.USER, self.PWD, 
-                                                          self.SERVER, self.PORT, self.DB_NAME)
-            
+        self.CONNSTR = 'mssql+pymssql://{}:{}@{}:{}/{}'.format(self.USER, self.PWD, self.SERVER, self.PORT, self.DB_NAME)
+        print("connection string: {}".format(self.CONNSTR))
+    
         try:
             self._ENGINE = sa.create_engine(self.CONNSTR)
         except:
@@ -86,51 +86,36 @@ class TableHandler(object):
         print('disconnected from {}'.format(self.SERVER))
 
 
-    def get_customers(self, MAX_CHUNK_SIZE=100000):
+    def get_customers(self):
         
+        """
+        get all new customers of interest from Lotus and p[ut them into a data frame]
+        """
+
+        # first just get the number of interesting customers on Lotus
+        NROWS_SRC = self._CONNECTION.execute("SELECT COUNT (*) FROM " +
+                self.SRC_TABLE +  "WHERE " +
+                self.qopts["before_today"]).fetchone()[0]
+
+        print('there are {} rows to analyse in {}...'.format(NROWS_SRC, self.SRC_TABLE))
         
+        # now download interesting customers: we only need their customer id (cust_id)
+        # and full name which is to be cmoposed from their first, last and amiddle names
+
         self.TODAYS_CUSTOMERS = pd.DataFrame()
 
-        # sql query for 'last 7 days' time span
-        self.LAST_SEVEN_DAYS = " ".join('BETWEEN', "'" + (datetime.now() + timedelta(days=-6)).strftime("%Y%m%d") + "'", 'AND', "'" + datetime.now().strftime("%Y%m%d") + "'")
+        # reading by chunks
+        print("attempting to collect the customers of interest...")
 
-        # how many customer ids are in the source table that we should be interested in
-        NROWS_SRC = self._CONNECTION.execute("SELECT COUNT (*) FROM " + self.SRC_TABLE +  "WHERE " +  self.qry_parts["CUST_LIST"](2) + " AND " + 
-                             self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS)).fetchone()[0]
+        for b in pd.read_sql("SELECT [CustomerID] as [cust_id], "
+                             "RTRIM(LTRIM(LOWER( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') ))) as [full_name] "
+                                    "FROM " + self.SRC_TABLE + " WHERE " +
+                                    self.qopts["before_today"], self._ENGINE,
+                                    chunksize=200000):
 
-        print('there are {} rows in {}'.format(NROWS_SRC, self.SRC_TABLE))
+            self.TODAYS_CUSTOMERS = pd.concat([self.TODAYS_CUSTOMERS, b])
         
-        # download "new" customer ids
-        if NROWS_SRC > MAX_CHUNK_SIZE:
-            
-            CIDS_SRC = sorted([row["CustomerID"] for row in self._CONNECTION.execute("SELECT DISTINCT CustomerID FROM " + self.SRC_TABLE +  "WHERE " +  self.qry_parts["CUST_LIST"](2) + " AND " + 
-                             self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS))])
-            
-            nchunks = NROWS_SRC if NROWS_SRC%MAX_CHUNK_SIZE == 0 else NROWS_SRC//MAX_CHUNK_SIZE + 1
-            
-            for ch in range(nchunks):
-                
-                print('uploading customer id chunk {} to {}..'.format(ch + 1, '#TempIdTable'))
-                # create a temporary table with the customer ids to update
-                pd.DataFrame({"CustomerID": [cid for cid in
-                    CIDS_SRC[ch*MAX_CHUNK_SIZE:(ch+1)*MAX_CHUNK_SIZE]]}).to_sql('#TempIdTable', s
-                    elf._ENGINE, if_exists="replace", dtype={"CustomerID":  sa.types.String(length=20)}, schema='TEGA.dbo')
-                
-                self.TODAYS_CUSTOMERS = pd.concat([self.TODAYS_CUSTOMERS, 
-                                    pd.read_sql("SELECT [CustomerID] as [cust_id],"
-                                    "RTRIM(LTRIM(LOWER( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') ))) as [full_name] "
-                                    "FROM #TempIdTable WHERE " + self.qry_parts["CUST_LIST"](2) + " AND " + 
-                                        self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS) + ")))", self._ENGINE)])
-        else:
-            
-            self.TODAYS_CUSTOMERS = pd.read_sql("SELECT [CustomerID] as [cust_id],"
-                                    "RTRIM(LTRIM(LOWER( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') ))) as [full_name] "
-                                    "FROM " + self.SRC_TABLE + " WHERE " + self.qry_parts["CUST_LIST"](2) + " AND " + 
-                                        self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS) + ")))", self._ENGINE)
-   
-            # note: can be either engine or connection, i.e. SQLAlchemy connectable
-    
-        print("collected {} customer ids from table {}".format(len(self.TODAYS_CUSTOMERS), self.SRC_TABLE))
+        print("collected {} customers from {}...".format(len(self.TODAYS_CUSTOMERS), self.SRC_TABLE))
             
         return self
     
@@ -145,6 +130,8 @@ class TableHandler(object):
         OVERWHITE
 
         """
+        print("starting to upload ethnicities...")
+
         if len(df_ethn) < 1:
 
             print("no new ethnicities to upload")
@@ -158,27 +145,47 @@ class TableHandler(object):
             except:
                  self.IDS_IN_TABLE = set()
             
-            print('unique customer ids already in the ethnicity table {}: {}'.format(self.TARGET_TABLE, len(self.IDS_IN_TABLE)))
+            print('customer ids already in {}: {}...'.format(self.TARGET_TABLE, len(self.IDS_IN_TABLE)))
     
-            # any customer ids that are among the new ones but somehow also sit in the ethnicity table? for information only
-    
+            # any  customer ids we figured out ethnicity for already in the ethnicity table?
+            # recall that we need to replace those with new ethnicity information
             self.IDS_TO_REPLACE = self.IDS_IN_TABLE & set(df_ethn.CustomerID)
+
             if self.IDS_TO_REPLACE:
-                self._CONNECTION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE " + "CustomerID in (" + ",".join(["'" + cid + "'" for cid in self.IDS_TO_REPLACE]) + ");")
-                print("deleted {} customer ids from {}".format(len(self.IDS_TO_REPLACE), self.TARGET_TABLE))
-            
-            # new customer ids to be appended to the ethnicity table
-            self.IDS_TO_APPEND = set(df_ethn.CustomerID)
-            print("-- customer ids to append: {}".format(len(self.IDS_TO_APPEND)))
-            # note: 'append': if table exists, insert data. Create if does not exist
-            
-            if self.IDS_TO_APPEND:
+
+                # since it's possible that we'll have to delete rows for many thouthands of 
+                # customer ids, we need to pypass the SQL limitation on th number of items on
+                # a list in say WHERE x IN (...); we put the ids to delete in a temporary table
+                # frist and then delete...
+
+                pd.DataFrame({"CustomerID": list(self.IDS_TO_REPLACE)}).to_sql("#ethn_TempCIDsToREPLACE", self._ENGINE, if_exists='replace', index=False, 
+                    dtype={"CustomerID": sa.types.String(length=20)}, schema="TEGA.dbo", chunksize=200000)
+
+                ROWS_TMP = self._CONNECTION.execute("SELECT COUNT (*) FROM TEGA.dbo.#ethn_TempCIDsToREPLACE").fetchone()[0]
                 
-                print("appending new ethnicities to table {}...".format(self.TARGET_TABLE), end='')
+                if ROWS_TMP:
+                    print("created a temporary table #ethn_TempCIDsToREPLACE with {} rows...".format(ROWS_TMP))
+                else:
+                    print("[ERROR]: SOMETHING IS WRONG WITH TEMP TABLE - IT SEEMS EMPTY!")
+
+                print("attempting to delete rows from {}...".format(self.TARGET_TABLE))
+                self._CONNECTION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE " + "CustomerID in (SELECT CustomerID FROM TEGA.dbo.#ethn_TempCIDsToREPLACE);")
+                
+            # new customer ids to be appended to the ethnicity table
+            print("starting appending new wors to {}...".format(self.TARGET_TABLE))
+            
+            self.IDS_TO_APPEND = set(df_ethn.CustomerID)
+    
+            if self.IDS_TO_APPEND:
+
+                print("customer ids to append: {}".format(len(self.IDS_TO_APPEND)))
+                
                 self._push_to_sql(df_ethn.loc[df_ethn.CustomerID.isin(self.IDS_TO_APPEND),['CustomerID', 'Ethnicity']], 
                     self.TARGET_TABLE, self._ENGINE)
     
                 print("ok")
+            else:
+                print("nothing to upload to {}".format(self.TARGET_TABLE))
     
     
     def send_email(self, df_ethn):
@@ -228,12 +235,13 @@ class EthnicityDetector(object):
         self.surname_ending_dict = json.load(open(self.NAME_DATA_DIR + "surname_endings_06102017.json", "r"))
         self.deciders = {"arabic": "name_and_surname", "italian": "name_and_surname", 
                          "filipino": "name_and_surname", "indian": "name_or_surname",
-                         "japanese": "name_and_surname", "serbian": "name_or_surname"}
-        # self.ethn_abbrs = {"arabic": "ar", "italian": "it", "filipino": "ph", "indian": "in", "japanese": "jp"}
+                         "japanese": "name_and_surname", "serbian": "surname"}
         
         # make name and surname dictionaries by letter for required ethnicities
         self.names = defaultdict(lambda: defaultdict(set))
         self.surnames = defaultdict(lambda: defaultdict(set))
+
+        self.CHUNK_SIZE = 10000    # in rows
     
     def __create_ethnic_dicts(self):
         
@@ -300,11 +308,11 @@ class EthnicityDetector(object):
     
     def pick_ethnicity(self):
         
-        x_ethns = self.input_df[(self.input_df["n_ethn"].str.len() > 1) | (self.input_df["s_ethn"].str.len() > 1)]
+        self.input_df = self.input_df[(self.input_df["n_ethn"].str.len() > 1) | (self.input_df["s_ethn"].str.len() > 1)]
         
         final_ethnicities = defaultdict(lambda: defaultdict(str))
         
-        for row in x_ethns.iterrows():
+        for row in self.input_df.iterrows():
             
             customer_ethnicities = set()
             
@@ -332,12 +340,12 @@ class EthnicityDetector(object):
         return self
 
 if __name__ == '__main__':
-    
-    tc = TableHandler(driver='pymssql')
+
+    tc = TableHandler()
 
     def job():
         
-        print('job started at {}...'.format(datetime.now()))
+        print('/njob started at {}...'.format(datetime.now()))
 
         t0 = time.time()
         
@@ -345,25 +353,22 @@ if __name__ == '__main__':
         tc.get_customers()
         tc.disconnect()
         
-        if len(tc.TODAYS_CUSTOMERS) == 0:
+        if len(tc.TODAYS_CUSTOMERS):
 
-            print('found no new customers on {}..'.format(tc.TODAY))
-            #tc.send_email(tc.TODAYS_CUSTOMERS)
-        else:
-             ed = EthnicityDetector(tc.TODAYS_CUSTOMERS, ["indian", "filipino", "japanese", "arabic", "italian", "serbian"]).clean_input()
-             ed.find_ethnicity_candidates().pick_ethnicity()
+            ed = EthnicityDetector(tc.TODAYS_CUSTOMERS, 
+                ["indian", "filipino", "japanese", "arabic", "italian", "serbian"]).clean_input()
+            ed.find_ethnicity_candidates().pick_ethnicity()
              
-             #tc.send_email(ed._detected_ethnicities)
-
-             tc.connect('src')
-             tc.upload_ethnicities(ed._detected_ethnicities)
-             tc.disconnect()
+             
+            tc.connect('src')
+            tc.upload_ethnicities(ed._detected_ethnicities)
+            tc.disconnect()
         
         tc.send_email(ed._detected_ethnicities)
 
         print("elapsed time: {:.0f} minutes {:.0f} seconds".format(*divmod(time.time() - t0, 60)))
 
-    schedule.every().day.at('04:55').do(job)
+    schedule.every().day.at('06:36').do(job)
     
     while True:
         schedule.run_pending()
