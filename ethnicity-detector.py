@@ -122,6 +122,7 @@ class TableHandler(object):
                                     "FROM #TempIdTable WHERE " + self.qry_parts["CUST_LIST"](2) + " AND " + 
                                         self.qry_parts["CRMOD_TIME"](self.LAST_SEVEN_DAYS) + ")))", self._ENGINE)])
         else:
+            
             self.TODAYS_CUSTOMERS = pd.read_sql("SELECT [CustomerID] as [cust_id],"
                                     "RTRIM(LTRIM(LOWER( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') ))) as [full_name] "
                                     "FROM " + self.SRC_TABLE + " WHERE " + self.qry_parts["CUST_LIST"](2) + " AND " + 
@@ -137,81 +138,48 @@ class TableHandler(object):
          
         """
 
-        IN: df_ethn - data frame with newly detected customer ethnicities
+        IN: df_ethn - data frame with newly detected customer ethnicities; columns are CustomerID and Ethnicity 
         OUT: nothing
 
         Upload df_ethn to the ethnicity table; if some customer ids are already there possibly with different ethnicities assigned, 
         OVERWHITE
 
         """
+        if len(df_ethn) < 1:
 
-        # get customer ids (as strings) that are already in the ethnicity table
-        try:
-            self.IDS_IN_TABLE = set(pd.read_sql("SELECT [CustomerID] FROM " + self.TARGET_TABLE + ";", 
-                                            self._ENGINE)["CustomerID"].astype(str))
-        except:
-             self.IDS_IN_TABLE = set()
-        
-        print('unique customer ids already in the ethnicity table {}: {}'.format(self.TARGET_TABLE, len(self.IDS_IN_TABLE)))
+            print("no new ethnicities to upload")
 
-        # any customer ids that are among the new ones but somehow also sit in the ethnicity table? for information only
+        else:
 
-        self.IDS_TO_UPDATE = self.IDS_IN_TABLE & set(df_ethn.CustomerID)
-        print("customer ids to update: {}".format(len(self.IDS_TO_UPDATE)))
-        
-        # new customer ids to be appended to the ethnicity table
-        self.IDS_TO_APPEND = set(df_ethn.CustomerID) - self.IDS_TO_UPDATE
-        print("-- customer ids to append: {}".format(len(self.IDS_TO_APPEND)))
-        # note: 'append': if table exists, insert data. Create if does not exist
-        
-        if self.IDS_TO_APPEND:
+            # get customer ids (as strings) that are already in the ethnicity table
+            try:
+                self.IDS_IN_TABLE = set(pd.read_sql("SELECT [CustomerID] FROM " + self.TARGET_TABLE + ";", 
+                                                self._ENGINE)["CustomerID"].astype(str))
+            except:
+                 self.IDS_IN_TABLE = set()
             
-            print("appending new ethnicities to table {}...".format(self.TARGET_TABLE), end='')
-            self._push_to_sql(df_ethn.loc[df_ethn.CustomerID.isin(self.IDS_TO_APPEND),['CustomerID',
-                'Ethnicity']], self.TARGET_TABLE, self._ENGINE)
-
-            print("ok")
-
-        if self.IDS_TO_UPDATE:
+            print('unique customer ids already in the ethnicity table {}: {}'.format(self.TARGET_TABLE, len(self.IDS_IN_TABLE)))
+    
+            # any customer ids that are among the new ones but somehow also sit in the ethnicity table? for information only
+    
+            self.IDS_TO_REPLACE = self.IDS_IN_TABLE & set(df_ethn.CustomerID)
+            if self.IDS_TO_REPLACE:
+                self._CONNECTION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE " + "CustomerID in (" + ",".join(["'" + cid + "'" for cid in self.IDS_TO_REPLACE]) + ");")
+                print("deleted {} customer ids from {}".format(len(self.IDS_TO_REPLACE), self.TARGET_TABLE))
             
-            upd_dict = defaultdict(lambda: defaultdict(str))
-
-            # create a temporary table with the customer ids to update
-            pd.DataFrame({"CustomerID": [cid for cid in
-                self.IDS_TO_UPDATE]}).to_sql('#TempIdTable', self._ENGINE,
-                    if_exists="replace", dtype={"CustomerID":
-                        sa.types.String(length=20)}, schema='TEGA.dbo')
-
-            print("reading the part of {} to update...".format(self.TARGET_TABLE))
-            df_to_update = pd.read_sql("SELECT * FROM " + self.TARGET_TABLE +
-                    " where CustomerID in (SELECT CustomerID FROM #TempIdTable);", self._ENGINE)
+            # new customer ids to be appended to the ethnicity table
+            self.IDS_TO_APPEND = set(df_ethn.CustomerID)
+            print("-- customer ids to append: {}".format(len(self.IDS_TO_APPEND)))
+            # note: 'append': if table exists, insert data. Create if does not exist
             
-            df_to_update["CustomerID"] = df_to_update["CustomerID"].astype(str)
-
-            # print(df_to_update.head())
-
-            print("setting up the updates...")
-
-            for row in df_to_update.iterrows():
-                new_cust_id = row[1].CustomerID
-                # ethnicities already assigned to this customer
-                new_cust_ethnicities = set(row[1].Ethnicity.split("|"))
-                updated_ethnicities = "|".join(new_cust_ethnicities | set(df_ethn.loc[df_ethn.CustomerID == new_cust_id, "Ethnicity"].values[0].split("|")))
-                upd_dict[new_cust_id] = {"Ethnicity": updated_ethnicities}
-            
-            print("creating an update data frame...")
-            upd_df = pd.DataFrame.from_dict(upd_dict, orient='index').reset_index().rename(columns={"index": "CustomerID"}) 
-            upd_df["CustomerID"] = upd_df["CustomerID"].astype(str)
-
-            print(upd_df.head())
-
-            print("deleting rows from {} for customer ids to be updated}...".format(self.TARGET_TABLE), end='')
-            res = self._ENGINE.execute("DELETE FROM " + self.TARGET_TABLE +" where CustomerID in (SELECT CustomerID FROM #TempIdTable);")
-            print('ok')
-
-            print("pushing the update data frame into {}...".format(self.TARGET_TABLE), end='')
-            self._push_to_sql(upd_df, self.TARGET_TABLE, self._ENGINE)
-            print('ok')
+            if self.IDS_TO_APPEND:
+                
+                print("appending new ethnicities to table {}...".format(self.TARGET_TABLE), end='')
+                self._push_to_sql(df_ethn.loc[df_ethn.CustomerID.isin(self.IDS_TO_APPEND),['CustomerID', 'Ethnicity']], 
+                    self.TARGET_TABLE, self._ENGINE)
+    
+                print("ok")
+    
     
     def send_email(self, df_ethn):
         
@@ -260,7 +228,7 @@ class EthnicityDetector(object):
         self.surname_ending_dict = json.load(open(self.NAME_DATA_DIR + "surname_endings_06102017.json", "r"))
         self.deciders = {"arabic": "name_and_surname", "italian": "name_and_surname", 
                          "filipino": "name_and_surname", "indian": "name_or_surname",
-                         "japanese": "name_and_surname"}
+                         "japanese": "name_and_surname", "serbian": "name_or_surname"}
         # self.ethn_abbrs = {"arabic": "ar", "italian": "it", "filipino": "ph", "indian": "in", "japanese": "jp"}
         
         # make name and surname dictionaries by letter for required ethnicities
@@ -382,7 +350,7 @@ if __name__ == '__main__':
             print('found no new customers on {}..'.format(tc.TODAY))
             #tc.send_email(tc.TODAYS_CUSTOMERS)
         else:
-             ed = EthnicityDetector(tc.TODAYS_CUSTOMERS, ["indian", "filipino", "japanese", "arabic", "italian"]).clean_input()
+             ed = EthnicityDetector(tc.TODAYS_CUSTOMERS, ["indian", "filipino", "japanese", "arabic", "italian", "serbian"]).clean_input()
              ed.find_ethnicity_candidates().pick_ethnicity()
              
              #tc.send_email(ed._detected_ethnicities)
