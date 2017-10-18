@@ -18,6 +18,8 @@ import time
 #import pyodbc
 import pymssql
 
+import arrow
+
 
 class TableHandler(object):
     
@@ -43,13 +45,17 @@ class TableHandler(object):
                     <= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] =
                     2)""".format(*["'" + (datetime.now() +
                         timedelta(days=-1)).strftime("%Y%m%d") + "'"]*2)}
+        self.timespan_descr = {"last_7_days": "within last seven days, " +  self.LAST_SEVEN_DAYS.lower(),
+                "before_today": "before today"}
+
+        self.TODAY_SYD = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
  
     # wrapper around pandas' to_sql
     def  _push_to_sql(self, df, tart_name, eng):
        
         df.to_sql(tart_name, eng, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
-                                                                            "Ethnicity":
-                                                                            sa.types.String(length=50)},
+                                                                            "Ethnicity": sa.types.String(length=50),
+                                                                            "AssignedOn": sa.types.String(length=10)},
                                                                             schema="TEGA.dbo",
                                                                             chunksize=200000)
 
@@ -65,7 +71,7 @@ class TableHandler(object):
             sys.exit(0)
         
         self.CONNSTR = 'mssql+pymssql://{}:{}@{}:{}/{}'.format(self.USER, self.PWD, self.SERVER, self.PORT, self.DB_NAME)
-        print("connection string: {}".format(self.CONNSTR))
+        #print("connection string: {}".format(self.CONNSTR))
     
         try:
             self._ENGINE = sa.create_engine(self.CONNSTR)
@@ -93,8 +99,7 @@ class TableHandler(object):
         """
 
         # first just get the number of interesting customers on Lotus
-        NROWS_SRC = self._CONNECTION.execute("SELECT COUNT (*) FROM " +
-                self.SRC_TABLE +  "WHERE " +
+        NROWS_SRC = self._CONNECTION.execute("SELECT COUNT (*) FROM " + self.SRC_TABLE +  "WHERE " +
                 self.qopts["before_today"]).fetchone()[0]
 
         print('there are {} rows to analyse in {}...'.format(NROWS_SRC, self.SRC_TABLE))
@@ -105,12 +110,11 @@ class TableHandler(object):
         self.TODAYS_CUSTOMERS = pd.DataFrame()
 
         # reading by chunks
-        print("attempting to collect the customers of interest...")
+        print("collect the customers of interest...")
 
         for b in pd.read_sql("SELECT [CustomerID] as [cust_id], "
                              "RTRIM(LTRIM(LOWER( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') ))) as [full_name] "
-                                    "FROM " + self.SRC_TABLE + " WHERE " +
-                                    self.qopts["before_today"], self._ENGINE,
+                            "FROM " + self.SRC_TABLE + " WHERE " + self.qopts["before_today"], self._ENGINE,
                                     chunksize=200000):
 
             self.TODAYS_CUSTOMERS = pd.concat([self.TODAYS_CUSTOMERS, b])
@@ -158,21 +162,24 @@ class TableHandler(object):
                 # a list in say WHERE x IN (...); we put the ids to delete in a temporary table
                 # frist and then delete...
 
-                pd.DataFrame({"CustomerID": list(self.IDS_TO_REPLACE)}).to_sql("#ethn_TempCIDsToREPLACE", self._ENGINE, if_exists='replace', index=False, 
+                print("writing customer ids into a temporary table..")
+
+                pd.DataFrame({"CustomerID":
+                    list(self.IDS_TO_REPLACE)}).to_sql("ethtmp", self._ENGINE, if_exists='replace', index=False, 
                     dtype={"CustomerID": sa.types.String(length=20)}, schema="TEGA.dbo", chunksize=200000)
 
-                ROWS_TMP = self._CONNECTION.execute("SELECT COUNT (*) FROM TEGA.dbo.#ethn_TempCIDsToREPLACE").fetchone()[0]
+                ROWS_TMP = self._CONNECTION.execute("SELECT COUNT (*) FROM TEGA.dbo.ethtmp").fetchone()[0]
                 
                 if ROWS_TMP:
-                    print("created a temporary table #ethn_TempCIDsToREPLACE with {} rows...".format(ROWS_TMP))
+                    print("created a temporary table [TEGA].[dbo].ethtmp with {} rows...".format(ROWS_TMP))
                 else:
                     print("[ERROR]: SOMETHING IS WRONG WITH TEMP TABLE - IT SEEMS EMPTY!")
 
                 print("attempting to delete rows from {}...".format(self.TARGET_TABLE))
-                self._CONNECTION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE " + "CustomerID in (SELECT CustomerID FROM TEGA.dbo.#ethn_TempCIDsToREPLACE);")
+                self._CONNECTION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE " + "CustomerID in (SELECT CustomerID FROM TEGA.dbo.ethtmp);")
                 
             # new customer ids to be appended to the ethnicity table
-            print("starting appending new wors to {}...".format(self.TARGET_TABLE))
+            print("starting appending new rows to {}...".format(self.TARGET_TABLE))
             
             self.IDS_TO_APPEND = set(df_ethn.CustomerID)
     
@@ -180,7 +187,10 @@ class TableHandler(object):
 
                 print("customer ids to append: {}".format(len(self.IDS_TO_APPEND)))
                 
-                self._push_to_sql(df_ethn.loc[df_ethn.CustomerID.isin(self.IDS_TO_APPEND),['CustomerID', 'Ethnicity']], 
+                df_ethn["AssignedOn"] = self.TODAY_SYD
+
+                self._push_to_sql(df_ethn.loc[df_ethn.CustomerID.isin(self.IDS_TO_APPEND),['CustomerID',
+                    'Ethnicity', 'AssignedOn']], 
                     self.TARGET_TABLE, self._ENGINE)
     
                 print("ok")
@@ -197,7 +207,7 @@ class TableHandler(object):
         
         msg['From'] = sender_email
         msg['To'] = ','.join([sender_email])
-        msg['Subject'] = 'update on ethnicities: customers modified on {}'.format(self.LAST_SEVEN_DAYS)
+        msg['Subject'] = 'update on ethnicities: customers created or modified {}'.format(self.timespan_descr["before_today"])
         
         dsample = pd.DataFrame()
 
@@ -206,7 +216,7 @@ class TableHandler(object):
             ns = 3 if len(this_ethnicity) > 2 else 1
             dsample = pd.concat([dsample, this_ethnicity.sample(n=ns)])
 
-        st_summary  = "-- new ethnic customer ids captured today:\n\n" + \
+        st_summary  = "-- new ethnic customer ids captured:\n\n" + \
                 "".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
                     for k, v in Counter(df_ethn['Ethnicity']).items()], key=lambda x: x[1], reverse=True)])
         
@@ -335,7 +345,7 @@ class EthnicityDetector(object):
         
         self._detected_ethnicities = pd.DataFrame.from_dict(final_ethnicities, orient='index').reset_index().rename(columns={"index": "CustomerID"}).dropna()
         self._detected_ethnicities['CustomerID'] = self._detected_ethnicities['CustomerID'].astype(str)
-        print("total new customer ids we detected ethnicity for: {}".format(len(self._detected_ethnicities.CustomerID.unique())))
+        print("total new customer ids we detected ethnicity for: {}".format(len(self._detected_ethnicities.CustomerID)))
 
         return self
 
@@ -368,7 +378,7 @@ if __name__ == '__main__':
 
         print("elapsed time: {:.0f} minutes {:.0f} seconds".format(*divmod(time.time() - t0, 60)))
 
-    schedule.every().day.at('06:36').do(job)
+    schedule.every().day.at('06:55').do(job)
     
     while True:
         schedule.run_pending()
