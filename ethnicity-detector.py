@@ -17,7 +17,6 @@ import time
 
 #import pyodbc
 import pymssql
-
 import arrow
 
 
@@ -100,7 +99,7 @@ class TableHandler(object):
 
         # first just get the number of interesting customers on Lotus
         NROWS_SRC = self._CONNECTION.execute("SELECT COUNT (*) FROM " + self.SRC_TABLE +  "WHERE " +
-                self.qopts["before_today"]).fetchone()[0]
+                self.qopts["last_7_days"]).fetchone()[0]
 
         print('there are {} rows to analyse in {}...'.format(NROWS_SRC, self.SRC_TABLE))
         
@@ -114,7 +113,7 @@ class TableHandler(object):
 
         for b in pd.read_sql("SELECT [CustomerID] as [cust_id], "
                              "RTRIM(LTRIM(LOWER( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') ))) as [full_name] "
-                            "FROM " + self.SRC_TABLE + " WHERE " + self.qopts["before_today"], self._ENGINE,
+                            "FROM " + self.SRC_TABLE + " WHERE " + self.qopts["last_7_days"], self._ENGINE,
                                     chunksize=200000):
 
             self.TODAYS_CUSTOMERS = pd.concat([self.TODAYS_CUSTOMERS, b])
@@ -154,6 +153,7 @@ class TableHandler(object):
             # any  customer ids we figured out ethnicity for already in the ethnicity table?
             # recall that we need to replace those with new ethnicity information
             self.IDS_TO_REPLACE = self.IDS_IN_TABLE & set(df_ethn.CustomerID)
+            print("need to replace {} of these".format(len(self.IDS_TO_REPLACE)))
 
             if self.IDS_TO_REPLACE:
 
@@ -162,7 +162,7 @@ class TableHandler(object):
                 # a list in say WHERE x IN (...); we put the ids to delete in a temporary table
                 # frist and then delete...
 
-                print("writing customer ids into a temporary table..")
+                print("writing customer ids to be REPLACED into a temporary table - expect {} ids to end up there..".format(len(self.IDS_TO_REPLACE)))
 
                 pd.DataFrame({"CustomerID":
                     list(self.IDS_TO_REPLACE)}).to_sql("ethtmp", self._ENGINE, if_exists='replace', index=False, 
@@ -175,8 +175,9 @@ class TableHandler(object):
                 else:
                     print("[ERROR]: SOMETHING IS WRONG WITH TEMP TABLE - IT SEEMS EMPTY!")
 
-                print("attempting to delete rows from {}...".format(self.TARGET_TABLE))
+                print("attempting to delete these rows from {}...".format(self.TARGET_TABLE))
                 self._CONNECTION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE " + "CustomerID in (SELECT CustomerID FROM TEGA.dbo.ethtmp);")
+                print("expected rows left in the table: {}".format(len(self.IDS_IN_TABLE) -len(self.IDS_TO_REPLACE)))
                 
             # new customer ids to be appended to the ethnicity table
             print("starting appending new rows to {}...".format(self.TARGET_TABLE))
@@ -200,14 +201,14 @@ class TableHandler(object):
     
     def send_email(self, df_ethn):
         
-        sender_email, sender_pwd, smtp_server, smpt_port = [line.split("=")[-1].strip() 
+        sender_email, sender_pwd, smtp_server, smpt_port, recep_emails = [line.split("=")[-1].strip() 
                                     for line in open("config/email.cnf", "r").readlines() if line.strip()]
         
         msg = MIMEMultipart()   
         
         msg['From'] = sender_email
-        msg['To'] = ','.join([sender_email])
-        msg['Subject'] = 'update on ethnicities: customers created or modified {}'.format(self.timespan_descr["before_today"])
+        msg['To'] = recep_emails
+        msg['Subject'] = 'update on ethnicities: customers created or modified {}'.format(self.timespan_descr["last_7_days"])
         
         dsample = pd.DataFrame()
 
@@ -226,7 +227,7 @@ class TableHandler(object):
         server.starttls()
         print('sending email notification...',end='')
         server.login(sender_email, sender_pwd)
-        server.sendmail(sender_email, sender_email, msg.as_string())
+        server.sendmail(sender_email, [email.strip() for email in recep_emails.split(";")], msg.as_string())
         print('ok')
         server.quit()
 
@@ -242,10 +243,11 @@ class EthnicityDetector(object):
         # load name and surname databases
         self.name_dict = json.load(open(self.NAME_DATA_DIR + "names_26092017.json", "r"))
         self.surname_dict = json.load(open(self.NAME_DATA_DIR + "surnames_26092017.json", "r"))
+        self.names_international = {line.strip().lower() for line in open(self.NAME_DATA_DIR + "names_international.txt", "r").readlines() if line}
         self.surname_ending_dict = json.load(open(self.NAME_DATA_DIR + "surname_endings_06102017.json", "r"))
         self.deciders = {"arabic": "name_and_surname", "italian": "name_and_surname", 
                          "filipino": "name_and_surname", "indian": "name_or_surname",
-                         "japanese": "name_and_surname", "serbian": "surname"}
+                         "japanese": "name_and_surname", "serbian": "surname", "thai": "name", "vietnamese": "surname"}
         
         # make name and surname dictionaries by letter for required ethnicities
         self.names = defaultdict(lambda: defaultdict(set))
@@ -310,7 +312,8 @@ class EthnicityDetector(object):
         self.__create_ethnic_dicts()
     
         self.input_df.loc[:, "n_ethn"] = self.input_df["full_name"].apply(lambda _: "|".join([ethnicity for ethnicity in self.ethnicity_list if 1 in 
-                                                                      [1 for name_prt in _.split() if name_prt in self.names[ethnicity][name_prt[0]]]]))
+                                                                      [1 for name_prt in _.split() if ((name_prt not in self.names_international) and 
+                                                                        (name_prt in self.names[ethnicity][name_prt[0]]))]]))
         
         self.input_df.loc[:, "s_ethn"] = self.input_df["full_name"].apply(self.__search_surname)
              
@@ -366,7 +369,7 @@ if __name__ == '__main__':
         if len(tc.TODAYS_CUSTOMERS):
 
             ed = EthnicityDetector(tc.TODAYS_CUSTOMERS, 
-                ["indian", "filipino", "japanese", "arabic", "italian", "serbian"]).clean_input()
+                ["indian", "filipino", "japanese", "arabic", "italian", "serbian", "thai", "vietnamese"]).clean_input()
             ed.find_ethnicity_candidates().pick_ethnicity()
              
              
@@ -378,7 +381,7 @@ if __name__ == '__main__':
 
         print("elapsed time: {:.0f} minutes {:.0f} seconds".format(*divmod(time.time() - t0, 60)))
 
-    schedule.every().day.at('06:55').do(job)
+    schedule.every().day.at('22:00').do(job)
     
     while True:
         schedule.run_pending()
