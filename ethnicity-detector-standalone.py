@@ -10,10 +10,9 @@ class EthnicityDetector(object):
     detect ethnicity given a string containing a full name
     """
     
-    def __init__(self, eth_lst):
-        
-        self.DATA_DIR = "/Users/ik/Data/" 
-        self.NAME_DATA_DIR = self.DATA_DIR + "names/"
+    def __init__(self, name_data_path="/Users/ik/Data/names/", eth_lst=["indian", "japanese", "greek", "arabic", 
+                                                                            "thai", "vietnamese", "serbian", "italian"] ):
+        self.NAME_DATA_DIR = name_data_path
         self.ETHNICITY_LIST = eth_lst
         print(self.ETHNICITY_LIST)
         
@@ -26,8 +25,10 @@ class EthnicityDetector(object):
         # note: name AND surname exactly matched is the obvious choice
         self.deciders = {"name_or_surname": {"indian", "japanese", "greek"},
                             "name_only": {"thai", "arabic"},
-                                "surname_only": {"vitnamese", "serbian", "italian"}}
+                                "surname_only": {"vietnamese", "serbian", "italian"}}
         
+        assert set(self.ETHNICITY_LIST) == {e for dec in self.deciders for e in self.deciders[dec]}, "ERROR! missing deciders!"
+
         # make name and surname dictionaries by letter for required ethnicities
         self.names = defaultdict(lambda: defaultdict(set))
         self.surnames = defaultdict(lambda: defaultdict(set))
@@ -124,5 +125,5 @@ class EthnicityDetector(object):
 
 if __name__ == '__main__':
 
-    ed = EthnicityDetector(["japanese", "thai", "arabic", "serbian", "indian", "greek", "italian"])
+    ed = EthnicityDetector()
     print(ed.get_ethnicity('panos callini'))
