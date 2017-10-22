@@ -52,6 +52,7 @@ class TableHandler(object):
         self.TODAY_SYD = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
 
         self._detected_ethnicities = pd.DataFrame()
+
         self.TEMP_TABLE = "tmptable"
 
         ed = EthnicityDetector()
@@ -72,8 +73,8 @@ class TableHandler(object):
         """
 
         # first just get the number of interesting customers on Lotus
-        NROWS_SRC = self._ENGINE.execute("SELECT COUNT (*) FROM " + self.SRC_TABLE +  "WHERE " +
-                self.QRY_TIMESPAN["last_7_days"]).fetchone()[0]
+        NROWS_SRC = self._ENGINE.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE , "WHERE",
+                                                        self.QRY_TIMESPAN["last_7_days"]])).fetchone()[0]
 
         print('there are {} rows to analyse in {}...'.format(NROWS_SRC, self.SRC_TABLE))
 
@@ -130,7 +131,7 @@ class TableHandler(object):
         
         msg['From'] = sender_email
         msg['To'] = recep_emails
-        msg['Subject'] = 'update on ethnicities: customers created or modified {}'.format(self.timespan_descr["last_7_days"])
+        msg['Subject'] = 'ethnicities: customers created or modified {}'.format(self.timespan_descr["last_7_days"])
         
         dsample = pd.DataFrame()
 
@@ -147,7 +148,7 @@ class TableHandler(object):
             formatters=[lambda _: "{:<12}".format(str(_).strip()), lambda _: "{:<30}".format(str(_).strip()), lambda _: "{:<20}".format(str(_).strip())]), 'plain'))
         server = smtplib.SMTP(smtp_server, smpt_port)
         server.starttls()
-        print('sending email notification...',end='')
+        print('sending email notification...', end='')
         server.login(sender_email, sender_pwd)
         server.sendmail(sender_email, [email.strip() for email in recep_emails.split(";")], msg.as_string())
         print('ok')
@@ -163,9 +164,10 @@ if __name__ == '__main__':
         
         tc.update_ethnicity_table()
         
-        tc.send_email(ed._detected_ethnicities)
+        tc.send_email()
 
     schedule.every().day.at('22:00').do(job)
     
     while True:
+
         schedule.run_pending()
