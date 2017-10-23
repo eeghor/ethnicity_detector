@@ -17,6 +17,24 @@ class NameFeatureExtractor(object):
 		"""
 		pass 
 
+	def _get_word_counts(self, st):
+		"""
+		count words (longer than 1 letter) separated by white space
+		"""
+		for w, cnt in Counter(st.split()).items():
+			if len(w) > 1:
+				self.features.add((w, cnt))
+
+	def _get_word_pairs(self, st):
+		"""
+		words (longer than 1 letter) separated by white space
+		"""
+		ok_words = [w for w in st.split() if len(w) > 1]
+
+		for i, w in enumerate(ok_words):
+			if len(ok_words) > i + 1:
+				self.features.add(('-'.join([w, ok_words[i+1]]), 1))
+
 	def _get_number_words(self, st):
 		"""
 		count the number of words separated by white space
@@ -33,20 +51,42 @@ class NameFeatureExtractor(object):
 
 	def _get_letter_counts(self, st):
 		"""
-		count ocurrences of all letters in fuill name
+		count ocurrences of all letters in full name
 		"""
 		for l, cnt in Counter(st.replace(' ', '')).items():
-			self.features.add(('cnt_let_' + l, cnt))
+			self.features.add(('cnt_' + l, cnt))
+
+	def _get_ngram_counts(self, st, n=2):
+		"""
+		count pairs of letters (for each word in full name)
+		"""
+		for p, cnt in Counter([w[i: i+n] for w in st.split() for i in range(len(w)) if len(w[i: i+n]) == n]).items():
+			self.features.add(('cnt_' + p, cnt))
+
+	def _get_endings(self, st, n=2):
+		"""
+		word endings, last n letters; binary
+		"""
+		for w in st.split():
+			if len(w) > n:
+				self.features.add(('end_' + w[-n:], 1))
 
 	def get_features(self, st):
 		"""
-		extract all features for the given full name into a dictionary
+		extract all features for the given full name
 		"""
+		self._get_word_counts(st)
 		self._get_number_words(st)
 		self._get_first_letters(st)
 		self._get_letter_counts(st)
+		self._get_ngram_counts(st)
+		self._get_ngram_counts(st, n=3)
+		self._get_endings(st)
+		self._get_endings(st, n=3)
+		self._get_word_pairs(st)
 
 		return self
+
 
 if __name__ == '__main__':
 	 ne = NameFeatureExtractor()
