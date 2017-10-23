@@ -71,6 +71,26 @@ class NameFeatureExtractor(object):
 			if len(w) > n:
 				self.features.add(('end_' + w[-n:], 1))
 
+	def _get_word_lengths(self, st):
+		
+		"""
+		sorted word lengths for words longer than 1 letter
+		"""
+		ok_words = sorted([str(len(w)) for w in st.split() if len(w) > 1], reverse=True)
+		if ok_words:
+			self.features.add(('len_' + '_'.join(ok_words), 1))
+
+	def _get_frac_letters_all_words(self, st):
+		"""
+		fraction of all letters used in name and surname used in both name and surname
+		"""
+		ok_words = [w for w  in st.split() if len(w) > 1]
+
+		if len(ok_words) > 1:
+			inboth = set(ok_words[0]) & set(ok_words[-1])
+			if inboth:
+				self.features.add(('frac_let_both_', round(len(inboth)/len(set(''.join(ok_words))), 2)))
+
 	def get_features(self, st):
 		"""
 		extract all features for the given full name
@@ -84,6 +104,8 @@ class NameFeatureExtractor(object):
 		self._get_endings(st)
 		self._get_endings(st, n=3)
 		self._get_word_pairs(st)
+		self._get_word_lengths(st)
+		self._get_frac_letters_all_words(st)
 
 		return self
 
