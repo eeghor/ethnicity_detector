@@ -86,9 +86,9 @@ class TableHandler(object):
                             self._ENGINE, chunksize=min(NROWS_SRC, self.CHSIZE)), 1):
 
             print("processing chunk #{} ({} rows)...".format(i, len(b)))
-            b["Ethnicity"] = b.full_name.apply(ed.get_ethnicity)
+            b["Ethnicity"] = b.full_name.apply(self.ed.get_ethnicity)
 
-            self._detected_ethnicities = pd.concat([self._detected_ethnicities, b[d.Ethnicity.notnull(), ["CustomerID", "Ethnicity"]]])
+            self._detected_ethnicities = pd.concat([self._detected_ethnicities, b.loc[b.Ethnicity.notnull(), ["CustomerID", "Ethnicity"]]])
         
         print("done. time: {:.0f} min {:.0f} sec".format(*divmod(time.time() - t_start, 60)))
         print("found {} rows with some ethnicities".format(len(self._detected_ethnicities)))
@@ -113,7 +113,7 @@ class TableHandler(object):
                     dtype={"CustomerID": sa.types.String(length=20)}, 
                     schema="TEGA.dbo", chunksize=(None if len(self._detected_ethnicities) <= self.CHSIZE else self.CHSIZE))
 
-            ROWS_TMP = self._CONNECTION.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
+            ROWS_TMP = self._ENGINE.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
                 
             print("made a temporary table with {} rows [{:.0f} min {:.0f} sec]...".format(ROWS_TMP, *divmod(time.time() - t_start, 60)))
             self._ENGINE.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {});".format(self.TEMP_TABLE))
