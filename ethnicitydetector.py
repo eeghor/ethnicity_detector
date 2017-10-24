@@ -11,7 +11,8 @@ class EthnicityDetector(object):
 	"""
 	
 	def __init__(self, name_data_path="/Users/ik/Data/names/", eth_lst=["indian", "japanese", "greek", "arabic", "turkish",
-																			"thai", "vietnamese", "balkan", "italian", "dutch", "samoan"] ):
+																			"thai", "vietnamese", "balkan", "italian",  "samoan",
+																			"hawaiian", "khmer", "chinese", "korean"] ):
 		self.NAME_DATA_DIR = name_data_path
 		self.ETHNICITY_LIST = eth_lst
 		# print(self.ETHNICITY_LIST)
@@ -24,9 +25,9 @@ class EthnicityDetector(object):
 		self.surname_ending_dict = json.load(open(self.NAME_DATA_DIR + "surname_endings_06102017.json", "r"))
 		
 		# note: name AND surname exactly matched is the obvious choice
-		self.deciders = {"name_or_surname": {"indian", "japanese", "greek", "dutch", "samoan"},
-							"name_only": {"thai", "arabic", "turkish"},
-								"surname_only": {"vietnamese", "balkan", "italian"}}
+		self.deciders = {"name_or_surname": {"indian", "japanese", "greek", "chinese"},
+							"name_only": {"thai", "arabic", "turkish", "hawaiian", "samoan", "khmer"},
+								"surname_only": {"vietnamese", "balkan", "italian", "korean"}}
 		
 		assert set(self.ETHNICITY_LIST) == {e for dec in self.deciders for e in self.deciders[dec]}, "ERROR! missing deciders!"
 
@@ -61,18 +62,20 @@ class EthnicityDetector(object):
 		# replace separators with white spaces
 		st = re.sub(self.SEPARATORS,' ', st)
 		# remove all non-letters
-		_ = [c for c in st if c in ascii_lowercase + ' '].strip()
+		_ = ''.join([c for c in st if c in ascii_lowercase + ' ']).strip()
 		if not _:
 			return None
 
-		st = ' '.join(''.join(_.split()))
+		st = ' '.join(_.split())
 	 
 		return st
 	
 	def get_ethnicity(self, st):
 
 		st = self._normalise_string(st)
-		#print(st)
+		
+		if not st:
+			return None
 
 		mtchd = {"name": set(), "surname": set()}
 		
