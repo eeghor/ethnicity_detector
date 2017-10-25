@@ -1,10 +1,15 @@
 import pandas as pd
 import json
-import sys
+
 from datetime import datetime, timedelta
+import time
+import arrow
+
 from collections import defaultdict, Counter
 from unidecode import unidecode
+
 from string import ascii_lowercase
+
 import sqlalchemy as sa
 
 # for sending an email notification:
@@ -13,14 +18,21 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 import schedule
-import time
 
-#import pyodbc
 import pymssql
-import arrow
+
+from multiprocessing import Pool
+import numpy as np
 
 from ethnicitydetector import EthnicityDetector
 
+def timer(func):
+    def wrapper(*args, **kwargs):
+        t_start = time.time()
+        res = func(*args, **kwargs)
+        print("f: {} # elapsed time: {:.0f} m {:.0f}s".format(func.__name__.upper(), *divmod(time.time() - t_start, 60)))
+        return res
+    return wrapper
 
 class TableHandler(object):
     
@@ -29,43 +41,86 @@ class TableHandler(object):
     """
     def __init__(self, server, user, port, user_pwd, db_name,
                     src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
-                        target_table='CustomerEthnicities', chsize=20000):
+                        target_table='CustomerEthnicities', chsize=200000):
         
-        self.SRC_TABLE = src_table   
-        self.CHSIZE = chsize
+        self.SRC_TABLE = src_table   # where we take customer id and name from 
 
         self._ENGINE = sa.create_engine('mssql+pymssql://{}:{}@{}:{}/{}'.format(user, user_pwd, server, port, db_name))
         
+        self.TEMP_TABLE = "tmptable"
+
+        self.TODAY_SYD = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
         self.LAST_SEVEN_DAYS = " ".join(['BETWEEN', "'" + (datetime.now() + timedelta(days=-6)).strftime("%Y%m%d") + "'", "AND", "'" +
         datetime.now().strftime("%Y%m%d") + "'"])
         
-        self.QRY_TIMESPAN = {"last_7_days": """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] {}))
-                    OR ([CreatedDate] {}) ) AND ([CustomerListID] = 2)""".format(*[self.LAST_SEVEN_DAYS]*2), 
+        self.QRY_TIMESPAN = {"last_7_days": 
+                            {"descr": "last_7_days": "within last seven days, " + self.LAST_SEVEN_DAYS.lower(),
+                                "qry": """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] {}))
+                    OR ([CreatedDate] {}) ) AND ([CustomerListID] = 2)""".format(*[self.LAST_SEVEN_DAYS]*2)},
                     "before_today":
-                    """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate]
+                    {"descr": "before today",
+                    "qry": """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate]
                     <= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] = 2)""".format(*["'" + (datetime.now() +
-                        timedelta(days=-1)).strftime("%Y%m%d") + "'"]*2)}
-
-        self.timespan_descr = {"last_7_days": "within last seven days, " + self.LAST_SEVEN_DAYS.lower(),
-                "before_today": "before today"}
-
-        self.TODAY_SYD = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
+                        timedelta(days=-1)).strftime("%Y%m%d") + "'"]*2)}}  
 
         self._detected_ethnicities = pd.DataFrame()
 
-        self.TEMP_TABLE = "tmptable"
-
+        # activate ethnicity detector instance
         ed = EthnicityDetector()
+
+        # vectorized function from ed to actually detect ethnicities (when applied to an array)
+        vf = np.vectorize(ed.get_ethnicity)
  
     # wrapper around pandas' to_sql
+
+    @timer
     def  _push_to_sql(self, df_upload, into_table, eng):
+
+        print('uploading {} to sql server...'.format(df_upload))
        
         df_upload.to_sql(into_table, eng, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
                                                                             "Ethnicity": sa.types.String(length=50),
                                                                             "AssignedOn": sa.types.String(length=10)},
                                                                             schema="TEGA.dbo",
-                                                                            chunksize=(None if len(df_upload) <= self.CHSIZE else self.CHSIZE))
+                                                                            chunksize=None if len(df_upload) <= 200000 else 200000)
 
+    def get_array_ethnicity(self, b):  
+
+        """
+        IN: numpy array b that has two columns, oned contains customer id and another a full name
+        OUT: numpy array with teo columns: customer id and ethnicity
+        
+        !NOTE: there will be 'None' where no ethnicityhas been detected 
+        """
+    
+        ets = vf(b[:,-1])  # we assume that the second column contains full names
+
+        stk = np.hstack((b[:,0].reshape(b.shape[0],1), ets.reshape(b.shape[0],1)))
+    
+        return stk
+
+    @timer
+    def get_ethnicities_parallel(self):
+
+        """
+        apply get_array_ethnicity to a number of dataframe chunks in parallel and then gather the results
+        """
+
+        print("identifying ethnicities in parallel...")
+
+        AVAIL_CPUS = multiprocessing.cpu_count()
+
+        pool = Pool(AVAIL_CPUS)
+
+        self._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(self.get_array_ethnicity, np.array_split(self._CUST_TO_CHECK.values, AVAIL_CPUS))),
+                   columns=["CustomerID", "Ethnicity"], dtype=str).query('Ethnicity != "None"')
+
+        pool.close()
+        pool.join()
+
+        return self
+
+    @timer
     def proc_new_customers(self):
         
         """
@@ -74,33 +129,31 @@ class TableHandler(object):
 
         # first just get the number of interesting customers on Lotus
         NROWS_SRC = self._ENGINE.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE , "WHERE",
-                                                        self.QRY_TIMESPAN["last_7_days"]])).fetchone()[0]
+                                                        self.QRY_TIMESPAN["last_7_days"]["qry"]])).fetchone()[0]
 
         print('there are {} rows to analyse in {}...'.format(NROWS_SRC, self.SRC_TABLE))
 
-        t_start = time.time()
 
-        for i, b in enumerate(pd.read_sql("SELECT [CustomerID], "
+        self._CUST_TO_CHECK = pd.read_sql("SELECT [CustomerID], "
                              "ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') as [full_name] "
-                            "FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["last_7_days"], 
-                            self._ENGINE, chunksize=min(NROWS_SRC, self.CHSIZE)), 1):
+                            "FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["last_7_days"]["qry"], 
+                            self._ENGINE, chunksize=None if NROWS_SRC <= 200000 else 200000):
 
-            print("processing chunk #{} ({} rows)...".format(i, len(b)))
-            b["Ethnicity"] = b.full_name.apply(self.ed.get_ethnicity)
+        self.get_ethnicities_parallel()
 
-            self._detected_ethnicities = pd.concat([self._detected_ethnicities, b.loc[b.Ethnicity.notnull(), ["CustomerID", "Ethnicity"]]])
-        
-        print("done. time: {:.0f} min {:.0f} sec".format(*divmod(time.time() - t_start, 60)))
         print("found {} rows with some ethnicities".format(len(self._detected_ethnicities)))
 
         return self
     
+    @timer
     def update_ethnicity_table(self):
          
         print("updating ethnicity table..")
 
         if len(self._detected_ethnicities) < 1:
+
             print("[WARNING]: no new ethnicities to upload!")
+            
         else:
 
             t_start = time.time()
@@ -111,7 +164,7 @@ class TableHandler(object):
             self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
                 if_exists='replace', index=False, 
                     dtype={"CustomerID": sa.types.String(length=20)}, 
-                    schema="TEGA.dbo", chunksize=(None if len(self._detected_ethnicities) <= self.CHSIZE else self.CHSIZE))
+                    schema="TEGA.dbo", chunksize=(None if len(self._detected_ethnicities) <= 200000 else 200000))
 
             ROWS_TMP = self._ENGINE.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
                 
@@ -131,7 +184,7 @@ class TableHandler(object):
         
         msg['From'] = sender_email
         msg['To'] = recep_emails
-        msg['Subject'] = 'ethnicities: customers created or modified {}'.format(self.timespan_descr["last_7_days"])
+        msg['Subject'] = 'ethnicities: customers created or modified {}'.format(self.QRY_TIMESPAN["last_7_days"]["descr"])
         
         dsample = pd.DataFrame()
 
