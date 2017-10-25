@@ -34,9 +34,7 @@ class EthnicityDetector(object):
 		# make name and surname dictionaries by letter for required ethnicities
 		self.names = dict()
 		self.surnames = dict()
-	
-	def _create_ethnic_dicts(self):
-		
+
 		for ethnicity in self.ETHNICITY_LIST:
 			
 			if ethnicity in self.name_dict:
@@ -45,9 +43,7 @@ class EthnicityDetector(object):
 
 			if ethnicity in self.surname_dict:
 				self.surnames.update({ethnicity: {letter: {unidecode(w) for w in self.surname_dict[ethnicity] 
-												 if w.isalpha() and unidecode(w)[0] == letter} for letter in ascii_lowercase}})
-
-		return self
+												 if w.isalpha() and unidecode(w)[0] == letter} for letter in ascii_lowercase}})		
 	
 	def _normalise_string(self, st):
 		
@@ -137,5 +133,5 @@ class EthnicityDetector(object):
 
 if __name__ == '__main__':
 
-	ed = EthnicityDetector()._create_ethnic_dicts()
+	ed = EthnicityDetector()
 	print(ed.get_ethnicity('panos mesut'))
