@@ -66,6 +66,7 @@ class EthnicityDetector(object):
 	 
 		return st
 	
+	@timer
 	def get_ethnicity(self, st):
 
 		st = self._normalise_string(st)
