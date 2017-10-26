@@ -26,6 +26,8 @@ import numpy as np
 
 from ethnicitydetector import EthnicityDetector
 
+import subprocess
+
 def timer(func):
     def wrapper(*args, **kwargs):
         t_start = time.time()
@@ -71,6 +73,10 @@ class TableHandler(object):
 
         # vectorized function from ed to actually detect ethnicities (when applied to an array)
         vf = np.vectorize(ed.get_ethnicity)
+
+        # bcp
+        self.BCP_OPTIONS = {"full_path": "", "format_file": "ethnicities.fmt", "temp_csv_file": "tmp_ethns.csv", "server": server}
+
  
     # wrapper around pandas' to_sql
 
@@ -161,6 +167,12 @@ class TableHandler(object):
             # add timestamp
             self._detected_ethnicities["AssignedOn"] = self.TODAY_SYD
 
+            if len(self._detected_ethnicities) > 10000:
+
+            	# create a bcp format file; arguments used to launch process may be a list or a string
+            	subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + self.TARGET_TABLE + ' format nul -f ' 
+            		+ self.BCP_OPTIONS["format_file"]  + '-n -T -S ' + self.BCP_OPTIONS["server"])
+            	
             # upload all detected ethnicities into a temporary table
             self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
                 if_exists='replace', index=False, 
