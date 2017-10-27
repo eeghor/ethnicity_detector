@@ -27,6 +27,7 @@ import numpy as np
 from ethnicitydetector import EthnicityDetector
 
 import subprocess
+import os
 
 def timer(func):
     def wrapper(*args, **kwargs):
@@ -167,17 +168,38 @@ class TableHandler(object):
             # add timestamp
             self._detected_ethnicities["AssignedOn"] = self.TODAY_SYD
 
+            print("uploadig new ethnicities to table {}".format(self.TEMP_TABLE))
+
             if len(self._detected_ethnicities) > 10000:
 
             	# create a bcp format file; arguments used to launch process may be a list or a string
-            	subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + self.TARGET_TABLE + ' format nul -f ' 
-            		+ self.BCP_OPTIONS["format_file"]  + '-n -T -S ' + self.BCP_OPTIONS["server"])
+
+            	while not os.path.exists(self.BCP_OPTIONS["format_file"]):
+
+            		subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + 'TEGA.dbo.' + self.TEMP_TABLE+ ' format nul -f ' 
+            			+ self.BCP_OPTIONS["format_file"]  + '-n -T -S ' + self.BCP_OPTIONS["server"])
+
+            	print("created bcp format file")
+
+            	self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"])
+
+            	print("saved new ethnicities to {}".format(self.BCP_OPTIONS["temp_csv_file"]))
             	
-            # upload all detected ethnicities into a temporary table
-            self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
-                if_exists='replace', index=False, 
-                    dtype={"CustomerID": sa.types.String(length=20)}, 
-                    schema="TEGA.dbo", chunksize=(None if len(self._detected_ethnicities) <= 200000 else 200000))
+
+            	print("uploading...")
+            	# now upload the csv file we have just created to SQL server usong bcp and the format file
+            	subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + 'TEGA.dbo.' + self.TARGET_TABLE + " in " + 
+            		self.BCP_OPTIONS["temp_csv_file"]+ ' -T -S ' + 
+            				self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
+      			print("done")    
+
+      		else:  	
+
+            	# upload all detected ethnicities into a temporary table
+            	self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
+            	    if_exists='replace', index=False, 
+            	        dtype={"CustomerID": sa.types.String(length=20)}, 
+            	        schema="TEGA.dbo")
 
             ROWS_TMP = self._ENGINE.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
                 
