@@ -1,5 +1,6 @@
 import re
 import json
+import time
 from unidecode import unidecode
 from collections import defaultdict
 from string import ascii_lowercase   # 'abcdefghijklmnopqrstuvwxyz'
@@ -66,7 +67,6 @@ class EthnicityDetector(object):
 	 
 		return st
 	
-	@timer
 	def get_ethnicity(self, st):
 
 		st = self._normalise_string(st)
