@@ -29,11 +29,13 @@ import subprocess
 import os
 
 def timer(func):
+
 	def wrapper(*args, **kwargs):
 		t_start = time.time()
 		res = func(*args, **kwargs)
 		print("f: {} # elapsed time: {:.0f} m {:.0f}s".format(func.__name__.upper(), *divmod(time.time() - t_start, 60)))
 		return res
+
 	return wrapper
 
 class TableHandler(object):
@@ -43,14 +45,15 @@ class TableHandler(object):
 	"""
 	def __init__(self, server, user, port, user_pwd, db_name,
 					src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
-						target_table='CustomerEthnicities5', chsize=200000):
+						target_table='[TEGA].[dbo].[CustomerEthnicities7]'):
 		
 		self.SRC_TABLE = src_table   # where we take customer id and name from 
 		self.TARGET_TABLE = target_table
+		self.TARGET_TABLE_FORMAT = "CustomerID nvarchar(20), Ethnicity nvarchar(50), AssignedOn nvarchar(10)"
 
 		self._ENGINE = sa.create_engine('mssql+pymssql://{}:{}@{}:{}/{}'.format(user, user_pwd, server, port, db_name))
 		
-		self.TEMP_TABLE = "tmptable"
+		self.TEMP_TABLE = "[TEGA].[dbo].tmptable"
 
 		self.TODAY_SYD = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
 		self.LAST_SEVEN_DAYS = " ".join(['BETWEEN', "'" + (datetime.now() + timedelta(days=-6)).strftime("%Y%m%d") + "'", "AND", "'" +
@@ -66,6 +69,7 @@ class TableHandler(object):
 					<= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] = 2)""".format(*["'" + (datetime.now() +
 						timedelta(days=-1)).strftime("%Y%m%d") + "'"]*2)}}  
 
+		# initialise a data frame with detected ethnicities now so that we can append to it
 		self._detected_ethnicities = pd.DataFrame()
 
 		# activate ethnicity detector instance
@@ -74,22 +78,19 @@ class TableHandler(object):
 		# vectorized function from ed to actually detect ethnicities (when applied to an array)
 		self.vf = np.vectorize(ed.get_ethnicity)
 
-		# bcp
-		self.BCP_OPTIONS = {"full_path": "", "format_file": "ethnicities.fmt", "temp_csv_file": "tmp_ethns.csv", "server": server}
+		# bcp options
+		self.BCP_OPTIONS = {"full_path": "bcp", "format_file": "ethnicities.fmt", "temp_csv_file": "tmp_ethns.csv", "server": server}
 
  
-	# wrapper around pandas' to_sql
+	# wrapper around pandas to_sql
 
 	@timer
 	def  _push_to_sql(self, df_upload, into_table, eng):
-
-		print('uploading {} to sql server...'.format(df_upload))
 	   
 		df_upload.to_sql(into_table, eng, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
 																			"Ethnicity": sa.types.String(length=50),
 																			"AssignedOn": sa.types.String(length=10)},
-																			schema="TEGA.dbo",
-																			chunksize=None if len(df_upload) <= 200000 else 200000)
+																			chunksize=None if len(df_upload) <= 100000 else 100000)
 
 	def get_array_ethnicity(self, b):  
 
@@ -119,7 +120,8 @@ class TableHandler(object):
 
 		pool = multiprocessing.Pool(AVAIL_CPUS)
 
-		self._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(self.get_array_ethnicity, np.array_split(self._CUST_TO_CHECK.values, AVAIL_CPUS))),
+		self._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(self.get_array_ethnicity, 
+										np.array_split(self._CUST_TO_CHECK.values, AVAIL_CPUS))),
 				   columns=["CustomerID", "Ethnicity"], dtype=str).query('Ethnicity != "None"')
 
 		pool.close()
@@ -132,8 +134,20 @@ class TableHandler(object):
 		"""
 		simply apply ethnicity detector on a data frame column with full names
 		"""
-		self._detected_ethnicities = pd.DataFrame(self.get_array_ethnicity(self._CUST_TO_CHECK.values),
+		if len(self._CUST_TO_CHECK) > 20000:
+
+			split_arrays = np.array_split(self._CUST_TO_CHECK.values, len(self._CUST_TO_CHECK)//20000 + int(len(self._CUST_TO_CHECK)%20000 > 0))
+
+			for smaller_array in split_arrays:
+				self._detected_ethnicities = pd.concat([self._detected_ethnicities, pd.DataFrame(self.get_array_ethnicity(smaller_array),
+				   columns=["CustomerID", "Ethnicity"], dtype=str).query('Ethnicity != "None"')])
+		else:
+			self._detected_ethnicities = pd.DataFrame(self.get_array_ethnicity(self._CUST_TO_CHECK),
 				   columns=["CustomerID", "Ethnicity"], dtype=str).query('Ethnicity != "None"')
+
+		print("sample detected ethnicities")
+		print(self._detected_ethnicities.head())
+
 		return self
 
 	@timer
@@ -145,15 +159,17 @@ class TableHandler(object):
 
 		# first just get the number of interesting customers on Lotus
 		NROWS_SRC = self._ENGINE.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE , "WHERE",
-														self.QRY_TIMESPAN["before_today"]["qry"]])).fetchone()[0]
+														self.QRY_TIMESPAN["before_today"]["qry"], "AND", "CustomerListID = 2"])).fetchone()[0]
 
 		print('there are {} rows to analyse in {}...'.format(NROWS_SRC, self.SRC_TABLE))
-
+		print("downloading these customer ids...")
 
 		self._CUST_TO_CHECK = pd.read_sql("SELECT [CustomerID], "
 							 "ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') as [full_name] "
-							"FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"], 
+							"FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"] + " AND CustomerListID = 2", 
 							self._ENGINE)
+		
+		print("done. sample:")
 		print(self._CUST_TO_CHECK .head())
 
 		#self.get_ethnicities_parallel()
@@ -165,8 +181,6 @@ class TableHandler(object):
 	
 	@timer
 	def update_ethnicity_table(self):
-		 
-		print("updating ethnicity table..")
 
 		if len(self._detected_ethnicities) < 1:
 
@@ -178,22 +192,34 @@ class TableHandler(object):
 			# add timestamp
 			self._detected_ethnicities["AssignedOn"] = self.TODAY_SYD
 
-			print("uploadig new ethnicities to table {}".format(self.TEMP_TABLE))
+			print("uploadig {} new customer ids to table {}".format(len(self._detected_ethnicities), self.TEMP_TABLE))
+
+			self._ENGINE.execute("""
+					IF OBJECT_ID(N'""" + self.TEMP_TABLE + """,N'U) IS NOT NULL 
+					BEGIN
+					DROP TABLE """ + self.TEMP_TABLE + """
+					END
+					GO
+					""")
+			
+			self._ENGINE.execute("CREATE TABLE " + self.TEMP_TABLE + " (" + self.TARGET_TABLE_FORMAT + ");")
+			print("created temporary table")
 
 			if len(self._detected_ethnicities) > 10000:
 
-				print("using bcp...")
+				print("attempting to use bcp...")
 				# create a bcp format file; arguments used to launch process may be a list or a string
 				while not os.path.exists(self.BCP_OPTIONS["format_file"]):
-					subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + 'TEGA.dbo.' + self.TEMP_TABLE+ ' format nul -f ' 
+					subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + self.TEMP_TABLE+ ' format nul -f ' 
 						+ self.BCP_OPTIONS["format_file"]  + '-n -T -S ' + self.BCP_OPTIONS["server"])
-				print("created bcp format file")
+				print("created bcp format file {}".format(self.BCP_OPTIONS["format_file"]))
+
 				self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"])
 				print("saved new ethnicities to {}".format(self.BCP_OPTIONS["temp_csv_file"]))
 				
 				print("uploading...")
 				# now u	pload the csv file we have just created to SQL server usong bcp and the format file
-				subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + 'TEGA.dbo.' + self.TEMP_TABLE + " in " + 
+				subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + self.TEMP_TABLE + " in " + 
 					self.BCP_OPTIONS["temp_csv_file"]+ ' -T -S ' + 
 							self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
 				print("done")
@@ -201,8 +227,7 @@ class TableHandler(object):
 				# upload all detected ethnicities into a temporary table
 				self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
 					if_exists='replace', index=False, 
-						dtype={"CustomerID": sa.types.String(length=20)}, 
-						schema="TEGA.dbo")
+						dtype={"CustomerID": sa.types.String(length=20)})
 
 			ROWS_TMP = self._ENGINE.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
 				
@@ -210,9 +235,9 @@ class TableHandler(object):
 			
 			# does self.TARGET_TABLE even exist? if it doesnt. create...
 			try:
-				self._ENGINE.execute("CREATE TABLE " + self.TARGET_TABLE + " (CustomerID nvarchar(20), Ethnicity nvarchar(50), AssignedOn nvarchar(10));")
+				self._ENGINE.execute("CREATE TABLE " + self.TARGET_TABLE + " (" + self.TARGET_TABLE_FORMAT + ");")
 			except:
-				print("created a target table {}".format(self.TARGET_TABLE))
+				print("target table already exists..")
 				pass
 
 			self._ENGINE.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {});".format(self.TEMP_TABLE))
