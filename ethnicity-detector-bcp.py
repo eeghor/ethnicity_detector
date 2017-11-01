@@ -45,7 +45,7 @@ class TableHandler(object):
 	"""
 	def __init__(self, server, user, port, user_pwd, db_name,
 					src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
-						target_table='[TEGA].[dbo].[CustomerEthnicities7]'):
+						target_table='[TEGA].[dbo].[CustomerEthnicities8]'):
 		
 		self.SRC_TABLE = src_table   # where we take customer id and name from 
 		self.TARGET_TABLE = target_table
@@ -53,6 +53,7 @@ class TableHandler(object):
 
 		self._ENGINE = sa.create_engine('mssql+pymssql://{}:{}@{}:{}/{}'.format(user, user_pwd, server, port, db_name))
 		
+		# temp table to upload detected ethnicities to
 		self.TEMP_TABLE = "[TEGA].[dbo].tmptable"
 
 		self.TODAY_SYD = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
@@ -150,6 +151,25 @@ class TableHandler(object):
 
 		return self
 
+	def _newcids_to_temp_table(self):
+		"""
+		find out which customer ids are of interest to us (and hence to be checked for ethnicity) and then collect these along with 
+		the corresponding names in a temporary table
+		"""
+		nrs = self._ENGINE.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE ,
+										 "WHERE", self.QRY_TIMESPAN["before_today"]["qry"]])).fetchone()[0]
+		print('customer ids to check for ethnicity: {}'.format(nrs))
+		print('running bcp to collect..')
+
+		# if that temporrayr table exists, drop
+		self._ENGINE.execute("IF OBJECT_ID(N'TEGA.dbo.tempNewCIDs', N'U') IS NOT NULL DROP TABLE TEGA.dbo.tempNewCIDs GO")
+		self._ENGINE.execute("SELECT [CustomerID], ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') as [full_name] INTO TEGA.dbo.tempNewCIDs FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"])
+		
+		# now that this temp table is already there, download it using bcp
+		subprocess.run("bcp TEGA.dbo.tempNewCIDs out temp_new_cids.csv -T -S " + self.BCP_OPTIONS['server'])
+		print('created local temporary file with new customer ids...')
+
+
 	@timer
 	def proc_new_customers(self):
 		
@@ -157,19 +177,10 @@ class TableHandler(object):
 		get all new customers of interest from Lotus and p[ut them into a data frame]
 		"""
 
-		# first just get the number of interesting customers on Lotus
-		NROWS_SRC = self._ENGINE.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE , "WHERE",
-														self.QRY_TIMESPAN["before_today"]["qry"], "AND", "CustomerListID = 2"])).fetchone()[0]
+		self._newcids_to_temp_table()
 
-		print('there are {} rows to analyse in {}...'.format(NROWS_SRC, self.SRC_TABLE))
-		print("downloading these customer ids...")
-
-		self._CUST_TO_CHECK = pd.read_sql("SELECT [CustomerID], "
-							 "ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') as [full_name] "
-							"FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"] + " AND CustomerListID = 2", 
-							self._ENGINE)
-		
-		print("done. sample:")
+		self._CUST_TO_CHECK = pd.read_csv('temp_new_cids.csv', encoding='latin-1')
+		print('local temp file contains {} CIDs'.format(len(self._CUST_TO_CHECK)))
 		print(self._CUST_TO_CHECK .head())
 
 		#self.get_ethnicities_parallel()
@@ -194,13 +205,7 @@ class TableHandler(object):
 
 			print("uploadig {} new customer ids to table {}".format(len(self._detected_ethnicities), self.TEMP_TABLE))
 
-			self._ENGINE.execute("""
-					IF OBJECT_ID(N'""" + self.TEMP_TABLE + """,N'U) IS NOT NULL 
-					BEGIN
-					DROP TABLE """ + self.TEMP_TABLE + """
-					END
-					GO
-					""")
+			self._ENGINE.execute("IF OBJECT_ID(N'" + self.TEMP_TABLE + "', N'U') IS NOT NULL DROP TABLE " + self.TEMP_TABLE + " GO")
 			
 			self._ENGINE.execute("CREATE TABLE " + self.TEMP_TABLE + " (" + self.TARGET_TABLE_FORMAT + ");")
 			print("created temporary table")
@@ -209,20 +214,17 @@ class TableHandler(object):
 
 				print("attempting to use bcp...")
 				# create a bcp format file; arguments used to launch process may be a list or a string
-				while not os.path.exists(self.BCP_OPTIONS["format_file"]):
-					subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + self.TEMP_TABLE+ ' format nul -f ' 
-						+ self.BCP_OPTIONS["format_file"]  + '-n -T -S ' + self.BCP_OPTIONS["server"])
+				subprocess.run("bcp " + self.TEMP_TABLE+ ' format nul -f ' + self.BCP_OPTIONS["format_file"] + '-n -T -S ' + self.BCP_OPTIONS["server"])
 				print("created bcp format file {}".format(self.BCP_OPTIONS["format_file"]))
 
 				self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"])
 				print("saved new ethnicities to {}".format(self.BCP_OPTIONS["temp_csv_file"]))
 				
 				print("uploading...")
-				# now u	pload the csv file we have just created to SQL server usong bcp and the format file
-				subprocess.run(self.BCP_OPTIONS["full_path"] + ' ' + self.TEMP_TABLE + " in " + 
-					self.BCP_OPTIONS["temp_csv_file"]+ ' -T -S ' + 
-							self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
+				# now upload the csv file we have just created to SQL server usong bcp and the format file
+				subprocess.run('bcp ' + self.TEMP_TABLE + " in " + self.BCP_OPTIONS["temp_csv_file"]+ ' -T -S ' + self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
 				print("done")
+
 			else:  	
 				# upload all detected ethnicities into a temporary table
 				self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
@@ -234,11 +236,7 @@ class TableHandler(object):
 			print("made a temporary table with {} rows [{:.0f} min {:.0f} sec]...".format(ROWS_TMP, *divmod(time.time() - t_start, 60)))
 			
 			# does self.TARGET_TABLE even exist? if it doesnt. create...
-			try:
-				self._ENGINE.execute("CREATE TABLE " + self.TARGET_TABLE + " (" + self.TARGET_TABLE_FORMAT + ");")
-			except:
-				print("target table already exists..")
-				pass
+			self._ENGINE.execute("IF OBJECT_ID(N'" + self.TARGET_TABLE + "', N'U') IS NOT NULL CREATE TABLE " + self.TEMP_TABLE +  " (" + self.TARGET_TABLE_FORMAT + ")"  + " GO")
 
 			self._ENGINE.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {});".format(self.TEMP_TABLE))
 
