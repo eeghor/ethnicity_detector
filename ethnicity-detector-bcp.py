@@ -66,8 +66,7 @@ class TableHandler(object):
 					OR ([CreatedDate] {}) ) AND ([CustomerListID] = 2)""".format(*[self.LAST_SEVEN_DAYS]*2)},
 					"before_today":
 					{"descr": "before today",
-					"qry": """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate]
-					<= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] = 2)""".format(*["'" + (datetime.now() +
+					"qry": """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] <= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] = 2)""".format(*["'" + (datetime.now() +
 						timedelta(days=-1)).strftime("%Y%m%d") + "'"]*2)}}  
 
 		# initialise a data frame with detected ethnicities now so that we can append to it
@@ -162,8 +161,13 @@ class TableHandler(object):
 		print('running bcp to collect..')
 
 		# if that temporrayr table exists, drop
-		self._ENGINE.execute("IF OBJECT_ID(N'TEGA.dbo.tempNewCIDs', N'U') IS NOT NULL DROP TABLE TEGA.dbo.tempNewCIDs GO")
-		self._ENGINE.execute("SELECT [CustomerID], ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') as [full_name] INTO TEGA.dbo.tempNewCIDs FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"])
+		self._ENGINE.execute("IF OBJECT_ID(N'TEGA.dbo.tempNewCIDs', N'U') IS NOT NULL DROP TABLE TEGA.dbo.tempNewCIDs")
+		print('checked if tenmp table exists and dropped it if it does')
+		print('now selecting into that table...')
+		qr = "SELECT [CustomerID], ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') as [full_name] INTO TEGA.dbo.tempNewCIDs FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"]
+		print(qr)
+
+		self._ENGINE.execute(qr)
 		
 		# now that this temp table is already there, download it using bcp
 		subprocess.run("bcp TEGA.dbo.tempNewCIDs out temp_new_cids.csv -T -S " + self.BCP_OPTIONS['server'])
@@ -205,7 +209,7 @@ class TableHandler(object):
 
 			print("uploadig {} new customer ids to table {}".format(len(self._detected_ethnicities), self.TEMP_TABLE))
 
-			self._ENGINE.execute("IF OBJECT_ID(N'" + self.TEMP_TABLE + "', N'U') IS NOT NULL DROP TABLE " + self.TEMP_TABLE + " GO")
+			self._ENGINE.execute("IF OBJECT_ID(N'" + self.TEMP_TABLE + "', N'U') IS NOT NULL DROP TABLE " + self.TEMP_TABLE)
 			
 			self._ENGINE.execute("CREATE TABLE " + self.TEMP_TABLE + " (" + self.TARGET_TABLE_FORMAT + ");")
 			print("created temporary table")
@@ -236,7 +240,7 @@ class TableHandler(object):
 			print("made a temporary table with {} rows [{:.0f} min {:.0f} sec]...".format(ROWS_TMP, *divmod(time.time() - t_start, 60)))
 			
 			# does self.TARGET_TABLE even exist? if it doesnt. create...
-			self._ENGINE.execute("IF OBJECT_ID(N'" + self.TARGET_TABLE + "', N'U') IS NOT NULL CREATE TABLE " + self.TEMP_TABLE +  " (" + self.TARGET_TABLE_FORMAT + ")"  + " GO")
+			self._ENGINE.execute("IF OBJECT_ID(N'" + self.TARGET_TABLE + "', N'U') IS NOT NULL CREATE TABLE " + self.TEMP_TABLE +  " (" + self.TARGET_TABLE_FORMAT + ")")
 
 			self._ENGINE.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {});".format(self.TEMP_TABLE))
 
