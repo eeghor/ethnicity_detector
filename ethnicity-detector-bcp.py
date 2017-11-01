@@ -11,6 +11,8 @@ from unidecode import unidecode
 from string import ascii_lowercase
 
 import sqlalchemy as sa
+from sqlalchemy import exc
+from sqlalchemy.orm import sessionmaker
 
 # for sending an email notification:
 import smtplib
@@ -52,6 +54,8 @@ class TableHandler(object):
 		self.TARGET_TABLE_FORMAT = "CustomerID nvarchar(20), Ethnicity nvarchar(50), AssignedOn nvarchar(10)"
 
 		self._ENGINE = sa.create_engine('mssql+pymssql://{}:{}@{}:{}/{}'.format(user, user_pwd, server, port, db_name))
+		Ses = sessionmaker(bind=self._ENGINE, autocommit=True)
+		self._SESSION = Ses()
 		
 		# temp table to upload detected ethnicities to
 		self.TEMP_TABLE = "[TEGA].[dbo].tmptable"
@@ -62,11 +66,10 @@ class TableHandler(object):
 		
 		self.QRY_TIMESPAN = {"last_7_days": 
 							{"descr": "within last seven days, " + self.LAST_SEVEN_DAYS.lower(),
-								"qry": """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] {}))
-					OR ([CreatedDate] {}) ) AND ([CustomerListID] = 2)""".format(*[self.LAST_SEVEN_DAYS]*2)},
+							"qry": "((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] {})) OR ([CreatedDate] {})) AND ([CustomerListID] = 2)".format(*[self.LAST_SEVEN_DAYS]*2)},
 					"before_today":
 					{"descr": "before today",
-					"qry": """((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] <= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] = 2)""".format(*["'" + (datetime.now() +
+					"qry": "((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] <= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] = 2)".format(*["'" + (datetime.now() +
 						timedelta(days=-1)).strftime("%Y%m%d") + "'"]*2)}}  
 
 		# initialise a data frame with detected ethnicities now so that we can append to it
@@ -155,22 +158,30 @@ class TableHandler(object):
 		find out which customer ids are of interest to us (and hence to be checked for ethnicity) and then collect these along with 
 		the corresponding names in a temporary table
 		"""
-		nrs = self._ENGINE.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE ,
+		nrs = self._SESSION.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE ,
 										 "WHERE", self.QRY_TIMESPAN["before_today"]["qry"]])).fetchone()[0]
 		print('customer ids to check for ethnicity: {}'.format(nrs))
 		print('running bcp to collect..')
 
 		# if that temporrayr table exists, drop
-		self._ENGINE.execute("IF OBJECT_ID(N'TEGA.dbo.tempNewCIDs', N'U') IS NOT NULL DROP TABLE TEGA.dbo.tempNewCIDs")
+		self._SESSION.execute("IF OBJECT_ID(N'TEGA.dbo.tempNewCIDs', N'U') IS NOT NULL DROP TABLE TEGA.dbo.tempNewCIDs")
 		print('checked if tenmp table exists and dropped it if it does')
+		print('creating temp table...')
+		try:
+			self._SESSION.execute("CREATE TABLE TEGA.dbo.tempNewCIDs (CustomerID int, full_name nvarchar(50))")
+		except exc.OperationalError:
+			# means drop didn't work
+			self._SESSION.execute("DROP TABLE TEGA.dbo.tempNewCIDs")
+			self._SESSION.execute("CREATE TABLE TEGA.dbo.tempNewCIDs (CustomerID int, full_name nvarchar(50))")
+
 		print('now selecting into that table...')
-		qr = "SELECT [CustomerID], ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') as [full_name] INTO TEGA.dbo.tempNewCIDs FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"]
+		qr = "INSERT INTO TEGA.dbo.tempNewCIDs SELECT [CustomerID], SUBSTRING(ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],''),1,50) as [full_name] FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"]
 		print(qr)
 
 		self._ENGINE.execute(qr)
 		
 		# now that this temp table is already there, download it using bcp
-		subprocess.run("bcp TEGA.dbo.tempNewCIDs out temp_new_cids.csv -T -S " + self.BCP_OPTIONS['server'])
+		subprocess.run("bcp TEGA.dbo.tempNewCIDs out temp_new_cids.csv -c -C 65001 -T -S " + self.BCP_OPTIONS['server'])
 		print('created local temporary file with new customer ids...')
 
 
@@ -183,7 +194,7 @@ class TableHandler(object):
 
 		self._newcids_to_temp_table()
 
-		self._CUST_TO_CHECK = pd.read_csv('temp_new_cids.csv', encoding='latin-1')
+		self._CUST_TO_CHECK = pd.read_csv('temp_new_cids.csv', sep='\t', dtype=str, error_bad_lines=False)
 		print('local temp file contains {} CIDs'.format(len(self._CUST_TO_CHECK)))
 		print(self._CUST_TO_CHECK .head())
 
@@ -209,7 +220,7 @@ class TableHandler(object):
 
 			print("uploadig {} new customer ids to table {}".format(len(self._detected_ethnicities), self.TEMP_TABLE))
 
-			self._ENGINE.execute("IF OBJECT_ID(N'" + self.TEMP_TABLE + "', N'U') IS NOT NULL DROP TABLE " + self.TEMP_TABLE)
+			self._SESSION.execute("IF OBJECT_ID(N'" + self.TEMP_TABLE + "', N'U') IS NOT NULL DROP TABLE " + self.TEMP_TABLE)
 			
 			self._ENGINE.execute("CREATE TABLE " + self.TEMP_TABLE + " (" + self.TARGET_TABLE_FORMAT + ");")
 			print("created temporary table")
@@ -235,17 +246,17 @@ class TableHandler(object):
 					if_exists='replace', index=False, 
 						dtype={"CustomerID": sa.types.String(length=20)})
 
-			ROWS_TMP = self._ENGINE.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
+			ROWS_TMP = self._SESSION.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
 				
 			print("made a temporary table with {} rows [{:.0f} min {:.0f} sec]...".format(ROWS_TMP, *divmod(time.time() - t_start, 60)))
 			
 			# does self.TARGET_TABLE even exist? if it doesnt. create...
-			self._ENGINE.execute("IF OBJECT_ID(N'" + self.TARGET_TABLE + "', N'U') IS NOT NULL CREATE TABLE " + self.TEMP_TABLE +  " (" + self.TARGET_TABLE_FORMAT + ")")
+			self._SESSION.execute("IF OBJECT_ID(N'" + self.TARGET_TABLE + "', N'U') IS NOT NULL CREATE TABLE " + self.TEMP_TABLE +  " (" + self.TARGET_TABLE_FORMAT + ")")
 
-			self._ENGINE.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {});".format(self.TEMP_TABLE))
+			self._SESSION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {});".format(self.TEMP_TABLE))
 
 			print("deleted cids already in ethnicity table [{:.0f} min {:.0f} sec]...".format(*divmod(time.time() - t_start, 60)))
-			self._ENGINE.execute("INSERT INTO " + self.TARGET_TABLE + " SELECT * FROM " + self.TEMP_TABLE)
+			self._SESSION.execute("INSERT INTO " + self.TARGET_TABLE + " SELECT * FROM " + self.TEMP_TABLE)
 			print("update complete [{:.0f} min {:.0f} sec]...".format(*divmod(time.time() - t_start, 60)))
 	
 	
@@ -293,7 +304,7 @@ if __name__ == '__main__':
 		
 		tc.send_email()
 
-	schedule.every().day.at('02:43').do(job)
+	schedule.every().day.at('07:11').do(job)
 	
 	while True:
 
