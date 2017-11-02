@@ -30,8 +30,11 @@ from ethnicitydetector import EthnicityDetector
 import subprocess
 import os
 
+from functools import wraps
+
 def timer(func):
 
+	@wraps(func)  # to preserve finction's metadata
 	def wrapper(*args, **kwargs):
 		t_start = time.time()
 		res = func(*args, **kwargs)
@@ -49,16 +52,19 @@ class TableHandler(object):
 					src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
 						target_table='[TEGA].[dbo].[CustomerEthnicities8]'):
 		
+		self.CHNK = 20000  # process ethnicities by CHNK (in rows)
+		self.TMP_NEW_CUSTOMER_TBLE = 'TEGA.dbo.tempNewCIDs'
+		self.TMP_NEW_CUSTOMER_FILE = "temp_new_cids.csv"
 		self.SRC_TABLE = src_table   # where we take customer id and name from 
 		self.TARGET_TABLE = target_table
-		self.TARGET_TABLE_FORMAT = "CustomerID nvarchar(20), Ethnicity nvarchar(50), AssignedOn nvarchar(10)"
+		self.TARGET_TABLE_FORMAT = "(CustomerID nvarchar(20), Ethnicity nvarchar(50), AssignedOn nvarchar(10))"
 
 		self._ENGINE = sa.create_engine('mssql+pymssql://{}:{}@{}:{}/{}'.format(user, user_pwd, server, port, db_name))
 		Ses = sessionmaker(bind=self._ENGINE, autocommit=True)
 		self._SESSION = Ses()
 		
 		# temp table to upload detected ethnicities to
-		self.TEMP_TABLE = "[TEGA].[dbo].tmptable"
+		self.TEMP_TABLE = "TEGA.dbo.tmpEthn"
 
 		self.TODAY_SYD = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
 		self.LAST_SEVEN_DAYS = " ".join(['BETWEEN', "'" + (datetime.now() + timedelta(days=-6)).strftime("%Y%m%d") + "'", "AND", "'" +
@@ -82,7 +88,10 @@ class TableHandler(object):
 		self.vf = np.vectorize(self.ed.get_ethnicity)
 
 		# bcp options
-		self.BCP_OPTIONS = {"full_path": "bcp", "format_file": "ethnicities.fmt", "temp_csv_file": "tmp_ethns.csv", "server": server}
+		self.BCP_OPTIONS = {"full_path": "bcp", 
+								"format_file": "ethnicities.fmt", 
+									"temp_csv_file": "tmp_ethns.csv", 
+										"server": server}
 
  
 	# wrapper around pandas to_sql
@@ -110,27 +119,27 @@ class TableHandler(object):
 	
 		return stk
 
-	@timer
-	def get_ethnicities_parallel(self):
+	# @timer
+	# def get_ethnicities_parallel(self):
 
-		"""
-		apply get_array_ethnicity to a number of dataframe chunks in parallel and then gather the results
-		"""
+	# 	"""
+	# 	apply get_array_ethnicity to a number of dataframe chunks in parallel and then gather the results
+	# 	"""
 
-		print("identifying ethnicities in parallel...")
+	# 	print("identifying ethnicities in parallel...")
 
-		AVAIL_CPUS = multiprocessing.cpu_count()
+	# 	AVAIL_CPUS = multiprocessing.cpu_count()
 
-		pool = multiprocessing.Pool(AVAIL_CPUS)
+	# 	pool = multiprocessing.Pool(AVAIL_CPUS)
 
-		self._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(self.get_array_ethnicity, 
-										np.array_split(self._CUST_TO_CHECK.values, AVAIL_CPUS))),
-				   columns=["CustomerID", "Ethnicity"], dtype=str).query('len(Ethnicity) > 5')
+	# 	self._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(self.get_array_ethnicity, 
+	# 									np.array_split(self._CUST_TO_CHECK.values, AVAIL_CPUS))),
+	# 			   columns=["CustomerID", "Ethnicity"], dtype=str).query('len(Ethnicity) > 5')
 
-		pool.close()
-		pool.join()
+	# 	pool.close()
+	# 	pool.join()
 
-		return self
+	# 	return self
 
 	@timer
 	def get_ethnicities(self):
@@ -138,7 +147,7 @@ class TableHandler(object):
 		simply apply ethnicity detector on a data frame column with full names
 		"""
 
-		for c in pd.read_csv('temp_new_cids.csv', sep='\t', dtype=str, error_bad_lines=False, header=None, chunksize=20000):
+		for i, c in enumerate(pd.read_csv(self.TMP_NEW_CUSTOMER_FILE, sep='\t', dtype=str, error_bad_lines=False, header=None, chunksize=self.CHNK)):
 
 			c['Ethnicity'] = c[1].apply(self.ed.get_ethnicity)
 			c = c[c.Ethnicity.isin(self.ed.ETHNICITY_LIST)]
@@ -147,19 +156,23 @@ class TableHandler(object):
 
 			self._detected_ethnicities = pd.concat([self._detected_ethnicities, c])
 
-		print("sample detected ethnicities")
-		print(self._detected_ethnicities.head())
+			print('ethnicity: processed {} customer ids...'.format((i+1)*self.CHNK))
+
+		self._detected_ethnicities["AssignedOn"] = self.TODAY_SYD
 
 		return self
 
-	def _recreate_table(self, table_name, table_fmt):
+	def _recreate_table(self, table_name, table_fmt, if_exists):
 
 		try:
 			self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
 		except exc.OperationalError:  # this comes up if table elready exists
 			# means drop didn't work
-			self._SESSION.execute(" ".join(["DROP TABLE", table_name]))
-			self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
+			if if_exists == 'create_new':
+				self._SESSION.execute(" ".join(["DROP TABLE", table_name]))
+				self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
+			else:
+				pass
 
 		print('re-created table {}'.format(table_name))
 
@@ -168,21 +181,21 @@ class TableHandler(object):
 		find out which customer ids are of interest to us (and hence to be checked for ethnicity) and then collect these along with 
 		the corresponding names in a temporary table
 		"""
-		nrs = self._SESSION.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE ,
+		nrs = self._SESSION.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE,
 										 "WHERE", self.QRY_TIMESPAN["before_today"]["qry"]])).fetchone()[0]
 		print('customer ids to check for ethnicity: {}'.format(nrs))
 		print('running bcp to collect..')
 
-		self._recreate_table('TEGA.dbo.tempNewCIDs', '(CustomerID int, full_name nvarchar(50))')
+		self._recreate_table(self.TMP_NEW_CUSTOMER_TBLE, '(CustomerID int, full_name nvarchar(50))', 'create_new')
 
 		print('now selecting into that table...')
-		qr = "INSERT INTO TEGA.dbo.tempNewCIDs SELECT [CustomerID], SUBSTRING(ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],''),1,50) as [full_name] FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"]
+		qr = "INSERT INTO " + self.TMP_NEW_CUSTOMER_TBLE + " SELECT [CustomerID], SUBSTRING(ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],''),1,50) as [full_name] FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"]
 		#print(qr)
 
 		self._SESSION.execute(qr)
 		
 		# now that this temp table is already there, download it using bcp
-		subprocess.run("bcp TEGA.dbo.tempNewCIDs out temp_new_cids.csv -c -C 65001 -T -S " + self.BCP_OPTIONS['server'])
+		subprocess.run("bcp " + self.TMP_NEW_CUSTOMER_TBLE + " out " + self.TMP_NEW_CUSTOMER_FILE + " -c -C 65001 -T -S " + self.BCP_OPTIONS['server'])
 		print('created local temporary file with new customer ids...')
 
 
@@ -199,7 +212,7 @@ class TableHandler(object):
 		#self.get_ethnicities_parallel()
 		self.get_ethnicities()
 
-		print("found {} rows with some ethnicities".format(len(self._detected_ethnicities)))
+		print("found {} ethnicities".format(len(self._detected_ethnicities)))
 
 		return self
 	
@@ -213,47 +226,27 @@ class TableHandler(object):
 		else:
 
 			t_start = time.time()
-			# add timestamp
-			self._detected_ethnicities["AssignedOn"] = self.TODAY_SYD
 
-			print("uploadig {} new customer ids to table {}".format(len(self._detected_ethnicities), self.TEMP_TABLE))
+			print("uploading ethnicities to temporary table {}...".format(self.TEMP_TABLE))
 
-			self._SESSION.execute("IF OBJECT_ID(N'" + self.TEMP_TABLE + "', N'U') IS NOT NULL DROP TABLE " + self.TEMP_TABLE)
+			self._recreate_table(self.TEMP_TABLE, self.TARGET_TABLE_FORMAT, 'create_new')
 			
-			self._ENGINE.execute("CREATE TABLE " + self.TEMP_TABLE + " (" + self.TARGET_TABLE_FORMAT + ");")
-			print("created temporary table")
-
-			if len(self._detected_ethnicities) > 10000:
-
-				print("attempting to use bcp...")
-				# create a bcp format file; arguments used to launch process may be a list or a string
-				subprocess.run("bcp " + self.TEMP_TABLE+ ' format nul -f ' + self.BCP_OPTIONS["format_file"] + '-n -T -S ' + self.BCP_OPTIONS["server"])
-				print("created bcp format file {}".format(self.BCP_OPTIONS["format_file"]))
-
-				self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"])
-				print("saved new ethnicities to {}".format(self.BCP_OPTIONS["temp_csv_file"]))
-				
-				print("uploading...")
-				# now upload the csv file we have just created to SQL server usong bcp and the format file
-				subprocess.run('bcp ' + self.TEMP_TABLE + " in " + self.BCP_OPTIONS["temp_csv_file"]+ ' -T -S ' + self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
-				print("done")
-
-			else:  	
-				# upload all detected ethnicities into a temporary table
-				self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
-					if_exists='replace', index=False, 
-						dtype={"CustomerID": sa.types.String(length=20)})
+			# create a format file for bcp (from the temporary table, it's the same as format for target table)
+			subprocess.run("bcp " + self.TEMP_TABLE + ' format nul -f ' + self.BCP_OPTIONS["format_file"] + '-n -T -S ' + self.BCP_OPTIONS["server"])
+			self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"])
+			# now upload the csv file we have just created to SQL server usong bcp and the format file
+			subprocess.run('bcp ' + self.TEMP_TABLE + " in " + self.BCP_OPTIONS["temp_csv_file"]+ '-t, -T -S ' + self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
 
 			ROWS_TMP = self._SESSION.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
 				
-			print("made a temporary table with {} rows [{:.0f} min {:.0f} sec]...".format(ROWS_TMP, *divmod(time.time() - t_start, 60)))
+			print("placed new ethnicities in a temporary table with {} rows [{:.0f} min {:.0f} sec]...".format(ROWS_TMP, *divmod(time.time() - t_start, 60)))
 			
-			# does self.TARGET_TABLE even exist? if it doesnt. create...
-			self._SESSION.execute("IF OBJECT_ID(N'" + self.TARGET_TABLE + "', N'U') IS NOT NULL CREATE TABLE " + self.TEMP_TABLE +  " (" + self.TARGET_TABLE_FORMAT + ")")
+			# now append the ethnicities in temporary table to the target table (replace those already there)
+
+			self._recreate_table(self.TARGET_TABLE, self.TARGET_TABLE_FORMAT, 'do_nothing')
 
 			self._SESSION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {});".format(self.TEMP_TABLE))
-
-			print("deleted cids already in ethnicity table [{:.0f} min {:.0f} sec]...".format(*divmod(time.time() - t_start, 60)))
+			
 			self._SESSION.execute("INSERT INTO " + self.TARGET_TABLE + " SELECT * FROM " + self.TEMP_TABLE)
 			print("update complete [{:.0f} min {:.0f} sec]...".format(*divmod(time.time() - t_start, 60)))
 	
