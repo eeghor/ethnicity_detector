@@ -129,8 +129,22 @@ class EthnicityDetector(object):
 			for ethnicity in mtchd["name"]:
 				if ethnicity in self.deciders["name_only"] | self.deciders["name_or_surname"]:
 					oked.add(ethnicity)
+		
+		res = None if oked else "|".join(sorted(oked))
+
+		# some extra filtering for chinese
+		if res == 'chinese':
+			name_parts = st.split()
+			if len(name_parts) > 2:
+				if (name_parts[-2] in ['da', 'de', 'del', 'della', 'dos', 'van']) and (len(name_parts[-1]) > 3):
+					res = None
+			elif len(name_parts) == 2:
+				if (name_parts[0] == 'bo') and (len(name_parts[1]) > 4):
+					res = None
+				if (len(name_parts[0]) > 4) and (name_parts[1] == 'long'):
+					res = None
 		# print("finally, oked=", oked)
-		return None if not oked else "|".join(sorted(oked))
+		return res
 
 if __name__ == '__main__':
 

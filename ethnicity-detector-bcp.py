@@ -76,10 +76,10 @@ class TableHandler(object):
 		self._detected_ethnicities = pd.DataFrame()
 
 		# activate ethnicity detector instance
-		ed = EthnicityDetector()
+		self.ed = EthnicityDetector()
 
 		# vectorized function from ed to actually detect ethnicities (when applied to an array)
-		self.vf = np.vectorize(ed.get_ethnicity)
+		self.vf = np.vectorize(self.ed.get_ethnicity)
 
 		# bcp options
 		self.BCP_OPTIONS = {"full_path": "bcp", "format_file": "ethnicities.fmt", "temp_csv_file": "tmp_ethns.csv", "server": server}
@@ -125,7 +125,7 @@ class TableHandler(object):
 
 		self._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(self.get_array_ethnicity, 
 										np.array_split(self._CUST_TO_CHECK.values, AVAIL_CPUS))),
-				   columns=["CustomerID", "Ethnicity"], dtype=str).query('Ethnicity != "None"')
+				   columns=["CustomerID", "Ethnicity"], dtype=str).query('len(Ethnicity) > 5')
 
 		pool.close()
 		pool.join()
@@ -137,21 +137,31 @@ class TableHandler(object):
 		"""
 		simply apply ethnicity detector on a data frame column with full names
 		"""
-		if len(self._CUST_TO_CHECK) > 20000:
 
-			split_arrays = np.array_split(self._CUST_TO_CHECK.values, len(self._CUST_TO_CHECK)//20000 + int(len(self._CUST_TO_CHECK)%20000 > 0))
+		for c in pd.read_csv('temp_new_cids.csv', sep='\t', dtype=str, error_bad_lines=False, header=None, chunksize=20000):
 
-			for smaller_array in split_arrays:
-				self._detected_ethnicities = pd.concat([self._detected_ethnicities, pd.DataFrame(self.get_array_ethnicity(smaller_array),
-				   columns=["CustomerID", "Ethnicity"], dtype=str).query('Ethnicity != "None"')])
-		else:
-			self._detected_ethnicities = pd.DataFrame(self.get_array_ethnicity(self._CUST_TO_CHECK),
-				   columns=["CustomerID", "Ethnicity"], dtype=str).query('Ethnicity != "None"')
+			c['Ethnicity'] = c[1].apply(self.ed.get_ethnicity)
+			c = c[c.Ethnicity.isin(self.ed.ETHNICITY_LIST)]
+			c = c.rename(columns={0: "FullName"})
+			c = c.drop(1, axis=1)
+
+			self._detected_ethnicities = pd.concat([self._detected_ethnicities, c])
 
 		print("sample detected ethnicities")
 		print(self._detected_ethnicities.head())
 
 		return self
+
+	def _recreate_table(self, table_name, table_fmt):
+
+		try:
+			self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
+		except exc.OperationalError:  # this comes up if table elready exists
+			# means drop didn't work
+			self._SESSION.execute(" ".join(["DROP TABLE", table_name]))
+			self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
+
+		print('re-created table {}'.format(table_name))
 
 	def _newcids_to_temp_table(self):
 		"""
@@ -163,22 +173,13 @@ class TableHandler(object):
 		print('customer ids to check for ethnicity: {}'.format(nrs))
 		print('running bcp to collect..')
 
-		# if that temporrayr table exists, drop
-		self._SESSION.execute("IF OBJECT_ID(N'TEGA.dbo.tempNewCIDs', N'U') IS NOT NULL DROP TABLE TEGA.dbo.tempNewCIDs")
-		print('checked if tenmp table exists and dropped it if it does')
-		print('creating temp table...')
-		try:
-			self._SESSION.execute("CREATE TABLE TEGA.dbo.tempNewCIDs (CustomerID int, full_name nvarchar(50))")
-		except exc.OperationalError:
-			# means drop didn't work
-			self._SESSION.execute("DROP TABLE TEGA.dbo.tempNewCIDs")
-			self._SESSION.execute("CREATE TABLE TEGA.dbo.tempNewCIDs (CustomerID int, full_name nvarchar(50))")
+		self._recreate_table('TEGA.dbo.tempNewCIDs', '(CustomerID int, full_name nvarchar(50))')
 
 		print('now selecting into that table...')
 		qr = "INSERT INTO TEGA.dbo.tempNewCIDs SELECT [CustomerID], SUBSTRING(ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],''),1,50) as [full_name] FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"]
-		print(qr)
+		#print(qr)
 
-		self._ENGINE.execute(qr)
+		self._SESSION.execute(qr)
 		
 		# now that this temp table is already there, download it using bcp
 		subprocess.run("bcp TEGA.dbo.tempNewCIDs out temp_new_cids.csv -c -C 65001 -T -S " + self.BCP_OPTIONS['server'])
@@ -192,11 +193,8 @@ class TableHandler(object):
 		get all new customers of interest from Lotus and p[ut them into a data frame]
 		"""
 
+		# create a local csv
 		self._newcids_to_temp_table()
-
-		self._CUST_TO_CHECK = pd.read_csv('temp_new_cids.csv', sep='\t', dtype=str, error_bad_lines=False)
-		print('local temp file contains {} CIDs'.format(len(self._CUST_TO_CHECK)))
-		print(self._CUST_TO_CHECK .head())
 
 		#self.get_ethnicities_parallel()
 		self.get_ethnicities()
@@ -304,7 +302,7 @@ if __name__ == '__main__':
 		
 		tc.send_email()
 
-	schedule.every().day.at('07:11').do(job)
+	schedule.every().day.at('17:10').do(job)
 	
 	while True:
 
