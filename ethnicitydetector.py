@@ -21,7 +21,7 @@ class EthnicityDetector(object):
 		
 		# load name and surname databases
 		self.name_dict = json.load(open(self.NAME_DATA_DIR + "names_26092017.json", "r"))
-		self.surname_dict = json.load(open(self.NAME_DATA_DIR + "surnames_26092017.json", "r"))
+		self.surname_dict = json.load(open(self.NAME_DATA_DIR + "surnames.json", "r"))
 		self.names_international = {line.strip().lower() for line in open(self.NAME_DATA_DIR + "names_international.txt", "r").readlines() if line}
 		self.surname_ending_dict = json.load(open(self.NAME_DATA_DIR + "surname_endings_06102017.json", "r"))
 		
@@ -130,11 +130,13 @@ class EthnicityDetector(object):
 				if ethnicity in self.deciders["name_only"] | self.deciders["name_or_surname"]:
 					oked.add(ethnicity)
 		
-		res = None if oked else "|".join(sorted(oked))
+		res = None if not oked else "|".join(sorted(oked))
 
 		# some extra filtering for chinese
 		if res == 'chinese':
+
 			name_parts = st.split()
+
 			if len(name_parts) > 2:
 				if (name_parts[-2] in ['da', 'de', 'del', 'della', 'dos', 'van']) and (len(name_parts[-1]) > 3):
 					res = None

@@ -52,7 +52,7 @@ class TableHandler(object):
 					src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
 						target_table='[TEGA].[dbo].[CustomerEthnicities8]'):
 		
-		self.CHNK = 20000  # process ethnicities by CHNK (in rows)
+		self.CHNK = 40000  # process ethnicities by CHNK (in rows)
 		self.TMP_NEW_CUSTOMER_TBLE = 'TEGA.dbo.tempNewCIDs'
 		self.TMP_NEW_CUSTOMER_FILE = "temp_new_cids.csv"
 		self.SRC_TABLE = src_table   # where we take customer id and name from 
@@ -93,54 +93,6 @@ class TableHandler(object):
 									"temp_csv_file": "tmp_ethns.csv", 
 										"server": server}
 
- 
-	# wrapper around pandas to_sql
-
-	@timer
-	def  _push_to_sql(self, df_upload, into_table, eng):
-	   
-		df_upload.to_sql(into_table, eng, if_exists='append', index=False, dtype={"CustomerID": sa.types.String(length=20),
-																			"Ethnicity": sa.types.String(length=50),
-																			"AssignedOn": sa.types.String(length=10)},
-																			chunksize=None if len(df_upload) <= 100000 else 100000)
-
-	def get_array_ethnicity(self, b):  
-
-		"""
-		IN: numpy array b that has two columns, oned contains customer id and another a full name
-		OUT: numpy array with teo columns: customer id and ethnicity
-		
-		!NOTE: there will be 'None' where no ethnicityhas been detected 
-		"""
-	
-		ets = self.vf(b[:,-1])  # we assume that the second column contains full names
-
-		stk = np.hstack((b[:,0].reshape(b.shape[0],1), ets.reshape(b.shape[0],1)))
-	
-		return stk
-
-	# @timer
-	# def get_ethnicities_parallel(self):
-
-	# 	"""
-	# 	apply get_array_ethnicity to a number of dataframe chunks in parallel and then gather the results
-	# 	"""
-
-	# 	print("identifying ethnicities in parallel...")
-
-	# 	AVAIL_CPUS = multiprocessing.cpu_count()
-
-	# 	pool = multiprocessing.Pool(AVAIL_CPUS)
-
-	# 	self._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(self.get_array_ethnicity, 
-	# 									np.array_split(self._CUST_TO_CHECK.values, AVAIL_CPUS))),
-	# 			   columns=["CustomerID", "Ethnicity"], dtype=str).query('len(Ethnicity) > 5')
-
-	# 	pool.close()
-	# 	pool.join()
-
-	# 	return self
-
 	@timer
 	def get_ethnicities(self):
 		"""
@@ -149,12 +101,14 @@ class TableHandler(object):
 
 		for i, c in enumerate(pd.read_csv(self.TMP_NEW_CUSTOMER_FILE, sep='\t', dtype=str, error_bad_lines=False, header=None, chunksize=self.CHNK)):
 
-			c['Ethnicity'] = c[1].apply(self.ed.get_ethnicity)
-			c = c[c.Ethnicity.isin(self.ed.ETHNICITY_LIST)]
 			c = c.rename(columns={0: "FullName"})
+			c['Ethnicity'] = c[1].apply(self.ed.get_ethnicity)
 			c = c.drop(1, axis=1)
-
-			self._detected_ethnicities = pd.concat([self._detected_ethnicities, c])
+			print(c.head())
+			c = c.loc[c.Ethnicity.notnull(),:]
+			print(c.head())
+			if len(c) > 0:
+				self._detected_ethnicities = pd.concat([self._detected_ethnicities, c])
 
 			print('ethnicity: processed {} customer ids...'.format((i+1)*self.CHNK))
 
@@ -232,10 +186,15 @@ class TableHandler(object):
 			self._recreate_table(self.TEMP_TABLE, self.TARGET_TABLE_FORMAT, 'create_new')
 			
 			# create a format file for bcp (from the temporary table, it's the same as format for target table)
-			subprocess.run("bcp " + self.TEMP_TABLE + ' format nul -f ' + self.BCP_OPTIONS["format_file"] + '-n -T -S ' + self.BCP_OPTIONS["server"])
+			print('creating a format file for bcp...')
+			subprocess.run("bcp " + self.TEMP_TABLE + ' format nul -f ' + self.BCP_OPTIONS["format_file"] + ' -n -T -S ' + self.BCP_OPTIONS["server"])
+			
+			print(self._detected_ethnicities.head())
+			print('saving detected ethnicities to a temporary csv file...')
 			self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"])
 			# now upload the csv file we have just created to SQL server usong bcp and the format file
-			subprocess.run('bcp ' + self.TEMP_TABLE + " in " + self.BCP_OPTIONS["temp_csv_file"]+ '-t, -T -S ' + self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
+			print('uploading from that temp file to a temp table using bcp...')
+			subprocess.run('bcp ' + self.TEMP_TABLE + " in " + self.BCP_OPTIONS["temp_csv_file"]+ ' -t, -T -S ' + self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
 
 			ROWS_TMP = self._SESSION.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
 				
@@ -262,19 +221,30 @@ class TableHandler(object):
 		msg['To'] = recep_emails
 		msg['Subject'] = 'ethnicities: customers created or modified {}'.format(self.QRY_TIMESPAN["before_today"]["descr"])
 		
-		dsample = pd.DataFrame()
+		if len(self._detected_ethnicities) < 1:
 
-		for k, v in Counter(self._detected_ethnicities['Ethnicity']).items():
-			this_ethnicity = self._detected_ethnicities[self._detected_ethnicities.Ethnicity == k]
-			ns = 3 if len(this_ethnicity) > 2 else 1
-			dsample = pd.concat([dsample, this_ethnicity.sample(n=ns)])
+			msg.attach(MIMEText('found no new ethnicities, nothing much to say..', 'plain'))
 
-		st_summary  = "-- new ethnic customer ids captured:\n\n" + \
-				"".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
-					for k, v in Counter(self._detected_ethnicities['Ethnicity']).items()], key=lambda x: x[1], reverse=True)])
+		else:
+
+			dsample = pd.DataFrame()
+	
+			for k, v in Counter(self._detected_ethnicities['Ethnicity']).items():
+				
+				this_ethnicity = self._detected_ethnicities[self._detected_ethnicities.Ethnicity == k]
+				ns = 3 if len(this_ethnicity) > 2 else 1
+				dsample = pd.concat([dsample, this_ethnicity.sample(n=ns)])
+
+				print('dsample=')
+				print(dsample.head())
+	
+			st_summary  = "-- new ethnic customer ids captured:\n\n" + \
+					"".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
+						for k, v in Counter(self._detected_ethnicities['Ethnicity']).items()], key=lambda x: x[1], reverse=True)])
+			
+			msg.attach(MIMEText(st_summary+ "\n-- sample:\n\n" + dsample.loc[:,["CustomerID", "FullName", "Ethnicity"]].to_string(index=False, justify="left",
+				formatters=[lambda _: "{:<12}".format(str(_).strip()), lambda _: "{:<30}".format(str(_).strip()), lambda _: "{:<20}".format(str(_).strip())]), 'plain'))
 		
-		msg.attach(MIMEText(st_summary+ "\n-- sample:\n\n" + dsample.loc[:,["CustomerID", "FullName", "Ethnicity"]].to_string(index=False, justify="left",
-			formatters=[lambda _: "{:<12}".format(str(_).strip()), lambda _: "{:<30}".format(str(_).strip()), lambda _: "{:<20}".format(str(_).strip())]), 'plain'))
 		server = smtplib.SMTP(smtp_server, smpt_port)
 		server.starttls()
 		print('sending email notification...', end='')
@@ -295,7 +265,7 @@ if __name__ == '__main__':
 		
 		tc.send_email()
 
-	schedule.every().day.at('17:10').do(job)
+	schedule.every().day.at('12:48').do(job)
 	
 	while True:
 
