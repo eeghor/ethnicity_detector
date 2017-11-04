@@ -1,14 +1,10 @@
 import pandas as pd
 import json
 
-from datetime import datetime, timedelta
 import time
 import arrow
 
-from collections import defaultdict, Counter
-from unidecode import unidecode
-
-from string import ascii_lowercase
+from collections import Counter
 
 import sqlalchemy as sa
 from sqlalchemy import exc
@@ -50,42 +46,38 @@ class TableHandler(object):
 	"""
 	def __init__(self, server, user, port, user_pwd, db_name,
 					src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
-						target_table='[TEGA].[dbo].[CustomerEthnicities8]'):
+						tar_table='[TEGA].[dbo].[CustomerEthnicities8]',
+							days=3):
 		
+		self.SRC_TABLE = src_table       # where we take customer id and name from 
+		self.TAR_TABLE = tar_table
+
 		self.CHNK = 40000  # process ethnicities by CHNK (in rows)
-		self.TMP_NEW_CUSTOMER_TBLE = 'TEGA.dbo.tempNewCIDs'
-		self.TMP_NEW_CUSTOMER_FILE = "temp_new_cids.csv"
-		self.SRC_TABLE = src_table   # where we take customer id and name from 
-		self.TARGET_TABLE = target_table
-		self.TARGET_TABLE_FORMAT = "(CustomerID nvarchar(20), Ethnicity nvarchar(50), AssignedOn nvarchar(10))"
+		self.NEWCUS_TBL = 'TEGA.dbo.tempNewCIDs'
+		self.TMP_NEW_CUSTOMER_FILE = "tempNewCIDs.csv"
+
+		self.TAR_TABLE_FORMAT = "(CustomerID nvarchar(20), FullName nvarchar(100), Ethnicity nvarchar(50), AssignedOn nvarchar(10))"
 
 		self._ENGINE = sa.create_engine('mssql+pymssql://{}:{}@{}:{}/{}'.format(user, user_pwd, server, port, db_name))
-		Ses = sessionmaker(bind=self._ENGINE, autocommit=True)
-		self._SESSION = Ses()
+		# create a configured "Session" class
+		Session = sessionmaker(bind=self._ENGINE, autocommit=True)
+		self._SESSION = Session()
 		
 		# temp table to upload detected ethnicities to
 		self.TEMP_TABLE = "TEGA.dbo.tmpEthn"
 
-		self.TODAY_SYD = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
-		self.LAST_SEVEN_DAYS = " ".join(['BETWEEN', "'" + (datetime.now() + timedelta(days=-6)).strftime("%Y%m%d") + "'", "AND", "'" +
-		datetime.now().strftime("%Y%m%d") + "'"])
-		
-		self.QRY_TIMESPAN = {"last_7_days": 
-							{"descr": "within last seven days, " + self.LAST_SEVEN_DAYS.lower(),
-							"qry": "((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] {})) OR ([CreatedDate] {})) AND ([CustomerListID] = 2)".format(*[self.LAST_SEVEN_DAYS]*2)},
-					"before_today":
-					{"descr": "before today",
-					"qry": "((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] <= {})) OR ([CreatedDate] <= {}) ) AND ([CustomerListID] = 2)".format(*["'" + (datetime.now() +
-						timedelta(days=-1)).strftime("%Y%m%d") + "'"]*2)}}  
+		self.TIMESPAN = "BETWEEN {} AND {}".format(arrow.utcnow().shift(days=-days).to('Australia/Sydney').format('YYYYMMDD'),
+													arrow.utcnow().to('Australia/Sydney').format('YYYYMMDD'))
+
+
+		self.WHERE_QRY = "WHERE ((([ModifiedDate] >= [CreatedDate]) AND ([ModifiedDate] {})) OR ([CreatedDate] {})) AND ([CustomerListID] = 2)".format(*[self.TIMESPAN]*2)
+					
 
 		# initialise a data frame with detected ethnicities now so that we can append to it
 		self._detected_ethnicities = pd.DataFrame()
 
 		# activate ethnicity detector instance
 		self.ed = EthnicityDetector()
-
-		# vectorized function from ed to actually detect ethnicities (when applied to an array)
-		self.vf = np.vectorize(self.ed.get_ethnicity)
 
 		# bcp options
 		self.BCP_OPTIONS = {"full_path": "bcp", 
@@ -99,24 +91,27 @@ class TableHandler(object):
 		simply apply ethnicity detector on a data frame column with full names
 		"""
 
-		for i, c in enumerate(pd.read_csv(self.TMP_NEW_CUSTOMER_FILE, sep='\t', dtype=str, error_bad_lines=False, header=None, chunksize=self.CHNK)):
+		print("detecting ethnicities...")
 
-			c = c.rename(columns={0: "FullName"})
-			c['Ethnicity'] = c[1].apply(self.ed.get_ethnicity)
-			c = c.drop(1, axis=1)
-			print(c.head())
+		for i, c in enumerate(pd.read_csv(self.TMP_NEW_CUSTOMER_FILE, sep='\t', dtype=str, error_bad_lines=False, chunksize=self.CHNK)):
+
+			c['Ethnicity'] = c["FullName"].apply(self.ed.get_ethnicity)
+			# note that now c has columns CustomerID, FullName and Ethnicity
 			c = c.loc[c.Ethnicity.notnull(),:]
-			print(c.head())
+
 			if len(c) > 0:
 				self._detected_ethnicities = pd.concat([self._detected_ethnicities, c])
 
-			print('ethnicity: processed {} customer ids...'.format((i+1)*self.CHNK))
+			print('ethnicity detector: processed {} customer ids...'.format((i+1)*self.CHNK))
 
-		self._detected_ethnicities["AssignedOn"] = self.TODAY_SYD
+		self._detected_ethnicities["AssignedOn"] = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
+		self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"], index=False, sep='\t')
+
+		print("done. total {} ethnicities detected".format(len(self._detected_ethnicities)))
 
 		return self
 
-	def _recreate_table(self, table_name, table_fmt, if_exists):
+	def _recreate_table(self, table_name, table_fmt, if_exists='do_nothing'):
 
 		try:
 			self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
@@ -125,92 +120,59 @@ class TableHandler(object):
 			if if_exists == 'create_new':
 				self._SESSION.execute(" ".join(["DROP TABLE", table_name]))
 				self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
-			else:
+			elif if_exists == 'do_nothing':
 				pass
 
 		print('re-created table {}'.format(table_name))
 
-	def _newcids_to_temp_table(self):
+	@timer
+	def newcids_to_csv(self):
 		"""
 		find out which customer ids are of interest to us (and hence to be checked for ethnicity) and then collect these along with 
 		the corresponding names in a temporary table
 		"""
-		nrs = self._SESSION.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE,
-										 "WHERE", self.QRY_TIMESPAN["before_today"]["qry"]])).fetchone()[0]
-		print('customer ids to check for ethnicity: {}'.format(nrs))
-		print('running bcp to collect..')
 
-		self._recreate_table(self.TMP_NEW_CUSTOMER_TBLE, '(CustomerID int, full_name nvarchar(50))', 'create_new')
+		print("checking {} for new customer ids to detect ethnicity for...".format(self.SRC_TABLE))
+		print('eligible ids: {}'.format(self._SESSION.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE, self.WHERE_QRY])).fetchone()[0]))
 
-		print('now selecting into that table...')
-		qr = "INSERT INTO " + self.TMP_NEW_CUSTOMER_TBLE + " SELECT [CustomerID], SUBSTRING(ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],''),1,50) as [full_name] FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"]
-		#print(qr)
+		self._recreate_table(self.NEWCUS_TBL, '(CustomerID nvarchar(20), FullName nvarchar(100))', 'create_new')
 
-		self._SESSION.execute(qr)
+		self._SESSION.execute(("INSERT INTO " + self.NEWCUS_TBL + " SELECT cast([CustomerID] as nvarchar(20)) as CustomerID, "
+			  "SUBSTRING( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],''), 1, 100) as [FullName] "
+			  "FROM " + self.SRC_TABLE + " " + self.WHERE_QRY))
 		
 		# now that this temp table is already there, download it using bcp
-		subprocess.run("bcp " + self.TMP_NEW_CUSTOMER_TBLE + " out " + self.TMP_NEW_CUSTOMER_FILE + " -c -C 65001 -T -S " + self.BCP_OPTIONS['server'])
-		print('created local temporary file with new customer ids...')
+		subprocess.run(("bcp 'SELECT \'CustomerID\', \'FullName\' UNION ALL SELECT * FROM {}' ".format(self.NEWCUS_TBL)
+						"queryout " + self.TMP_NEW_CUSTOMER_FILE
+						" -b 10000 -c -C 65001 -T -S " + self.BCP_OPTIONS['server']))
 
-
-	@timer
-	def proc_new_customers(self):
-		
-		"""
-		get all new customers of interest from Lotus and p[ut them into a data frame]
-		"""
-
-		# create a local csv
-		self._newcids_to_temp_table()
-
-		#self.get_ethnicities_parallel()
-		self.get_ethnicities()
-
-		print("found {} ethnicities".format(len(self._detected_ethnicities)))
-
-		return self
+		print('downloaded ids and their full names to {}'.format(self.TMP_NEW_CUSTOMER_FILE))
 	
 	@timer
 	def update_ethnicity_table(self):
 
-		if len(self._detected_ethnicities) < 1:
+		print("updating ethnicity table {}...".format(sel.TAR_TABLE))
 
-			print("[WARNING]: no new ethnicities to upload!")
-
-		else:
-
-			t_start = time.time()
-
-			print("uploading ethnicities to temporary table {}...".format(self.TEMP_TABLE))
-
-			self._recreate_table(self.TEMP_TABLE, self.TARGET_TABLE_FORMAT, 'create_new')
+		self._recreate_table(self.TEMP_TABLE, self.TAR_TABLE_FORMAT, 'create_new')
+		
+		# create a format file for bcp (from the temporary table, it's the same as format for target table)
+		print('creating a format file for bcp...')
+		subprocess.run("bcp " + self.TEMP_TABLE + ' format nul -f ' + self.BCP_OPTIONS["format_file"] + ' -n -T -S ' + self.BCP_OPTIONS["server"])
+		
+		subprocess.run('bcp ' + self.TEMP_TABLE + " in " + self.BCP_OPTIONS["temp_csv_file"]+ ' -T -S ' + self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
 			
-			# create a format file for bcp (from the temporary table, it's the same as format for target table)
-			print('creating a format file for bcp...')
-			subprocess.run("bcp " + self.TEMP_TABLE + ' format nul -f ' + self.BCP_OPTIONS["format_file"] + ' -n -T -S ' + self.BCP_OPTIONS["server"])
-			
-			print(self._detected_ethnicities.head())
-			print('saving detected ethnicities to a temporary csv file...')
-			self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"])
-			# now upload the csv file we have just created to SQL server usong bcp and the format file
-			print('uploading from that temp file to a temp table using bcp...')
-			subprocess.run('bcp ' + self.TEMP_TABLE + " in " + self.BCP_OPTIONS["temp_csv_file"]+ ' -t, -T -S ' + self.BCP_OPTIONS["server"] + ' -f ' + self.BCP_OPTIONS["format_file"])
+		# now append the ethnicities in temporary table to the target table (replace those already there)
+		self._recreate_table(self.TAR_TABLE, self.TAR_TABLE_FORMAT, 'do_nothing')
+		self._SESSION.execute("DELETE FROM " + self.TAR_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {})".format(self.TEMP_TABLE))
+		self._SESSION.execute("INSERT INTO " + self.TAR_TABLE + " SELECT * FROM " + self.TEMP_TABLE)
 
-			ROWS_TMP = self._SESSION.execute("SELECT COUNT (*) FROM {};".format(self.TEMP_TABLE)).fetchone()[0]
-				
-			print("placed new ethnicities in a temporary table with {} rows [{:.0f} min {:.0f} sec]...".format(ROWS_TMP, *divmod(time.time() - t_start, 60)))
-			
-			# now append the ethnicities in temporary table to the target table (replace those already there)
-
-			self._recreate_table(self.TARGET_TABLE, self.TARGET_TABLE_FORMAT, 'do_nothing')
-
-			self._SESSION.execute("DELETE FROM " + self.TARGET_TABLE + " WHERE CustomerID in (SELECT CustomerID FROM {});".format(self.TEMP_TABLE))
-			
-			self._SESSION.execute("INSERT INTO " + self.TARGET_TABLE + " SELECT * FROM " + self.TEMP_TABLE)
-			print("update complete [{:.0f} min {:.0f} sec]...".format(*divmod(time.time() - t_start, 60)))
+		self._SESSION.close()
+		print("done.")
 	
 	
 	def send_email(self):
+
+		print("sending email notification...")
 		
 		sender_email, sender_pwd, smtp_server, smpt_port, recep_emails = [line.split("=")[-1].strip() 
 									for line in open("config/email.cnf", "r").readlines() if line.strip()]
@@ -219,11 +181,11 @@ class TableHandler(object):
 		
 		msg['From'] = sender_email
 		msg['To'] = recep_emails
-		msg['Subject'] = 'ethnicities: customers created or modified {}'.format(self.QRY_TIMESPAN["before_today"]["descr"])
+		msg['Subject'] = 'ethnicity update: {} new'.format(len(self._detected_ethnicities))
 		
 		if len(self._detected_ethnicities) < 1:
 
-			msg.attach(MIMEText('found no new ethnicities, nothing much to say..', 'plain'))
+			msg.attach(MIMEText('no new ethnicities, nothing much to say..', 'plain'))
 
 		else:
 
@@ -231,12 +193,10 @@ class TableHandler(object):
 	
 			for k, v in Counter(self._detected_ethnicities['Ethnicity']).items():
 				
+				# recall "CustomerID", "FullName", "Ethnicity", "AssignedOn"
 				this_ethnicity = self._detected_ethnicities[self._detected_ethnicities.Ethnicity == k]
 				ns = 3 if len(this_ethnicity) > 2 else 1
 				dsample = pd.concat([dsample, this_ethnicity.sample(n=ns)])
-
-				print('dsample=')
-				print(dsample.head())
 	
 			st_summary  = "-- new ethnic customer ids captured:\n\n" + \
 					"".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
@@ -247,7 +207,6 @@ class TableHandler(object):
 		
 		server = smtplib.SMTP(smtp_server, smpt_port)
 		server.starttls()
-		print('sending email notification...', end='')
 		server.login(sender_email, sender_pwd)
 		server.sendmail(sender_email, [email.strip() for email in recep_emails.split(";")], msg.as_string())
 		print('ok')
@@ -259,13 +218,15 @@ if __name__ == '__main__':
 
 	def job():
 		
-		tc.proc_new_customers()
+		tc.newcids_to_csv()
+
+		tc.get_ethnicities()
 		
 		tc.update_ethnicity_table()
 		
 		tc.send_email()
 
-	schedule.every().day.at('12:48').do(job)
+	schedule.every().day.at('16:25').do(job)
 	
 	while True:
 

@@ -145,7 +145,11 @@ class EthnicityDetector(object):
 					res = None
 				if (len(name_parts[0]) > 4) and (name_parts[1] == 'long'):
 					res = None
-		# print("finally, oked=", oked)
+
+		# if too many possible ethnicities discard all
+		if res.count("|") > 2:
+			res = None
+			
 		return res
 
 if __name__ == '__main__':
