@@ -147,7 +147,7 @@ class EthnicityDetector(object):
 					res = None
 
 		# if too many possible ethnicities discard all
-		if res.count("|") > 2:
+		if res and (res.count("|") > 2):
 			res = None
 			
 		return res
