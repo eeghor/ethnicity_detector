@@ -59,6 +59,7 @@ class TableHandler(object):
 		self.TAR_TABLE_FORMAT = "(CustomerID int, FullName nvarchar(100), Ethnicity nvarchar(50), AssignedOn nvarchar(20))"
 
 		self._ENGINE = sa.create_engine('mssql+pymssql://{}:{}@{}:{}/{}'.format(user, user_pwd, server, port, db_name))
+		
 		# create a configured "Session" class
 		Session = sessionmaker(bind=self._ENGINE, autocommit=True)
 		self._SESSION = Session()
@@ -86,49 +87,7 @@ class TableHandler(object):
 										"temp_csv_file": "tmp_ethns.csv", 
 											"server": server}
 
-	@timer
-	def get_ethnicities(self):
-		"""
-		simply apply ethnicity detector on a data frame column with full names
-		"""
-
-		print("detecting ethnicities...")
-
-		for i, c in enumerate(pd.read_csv(self.BCP_OPTIONS["temp_new_cust_file"], sep=':', dtype={"CustomerID": int, "FullName": str}, 
-											names=["CustomerID", "FullName"], error_bad_lines=False, 
-												chunksize=self.CHNK, encoding='latin-1', header=None)):
-
-			c['Ethnicity'] = c["FullName"].apply(self.ed.get_ethnicity)
-			# note that now c has columns CustomerID, FullName and Ethnicity
-			c = c.loc[c.Ethnicity.notnull(),:]
-			# print("c=",c)
-
-			if len(c) > 0:
-				self._detected_ethnicities = pd.concat([self._detected_ethnicities, c])
-
-			print('ethnicity detector: processed {} customer ids...'.format((i+1)*self.CHNK))
-
-		self._detected_ethnicities["AssignedOn"] = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
-		self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"], index=False, sep='\t', header=False, encoding='latin-1')
-
-		print("done. total {} ethnicities detected".format(len(self._detected_ethnicities)))
-
-		return self
-
-	def _recreate_table(self, table_name, table_fmt, if_exists='do_nothing'):
-
-		try:
-			self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
-		except exc.OperationalError:  # this comes up if table elready exists
-			# means drop didn't work
-			if if_exists == 'create_new':
-				self._SESSION.execute(" ".join(["DROP TABLE", table_name]))
-				self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
-			elif if_exists == 'do_nothing':
-				pass
-
-		print('re-created table {}'.format(table_name))
-
+	
 	@timer
 	def newcids_to_csv(self):
 		"""
@@ -147,14 +106,56 @@ class TableHandler(object):
 			  "FROM " + self.SRC_TABLE + " " + self.WHERE_QRY))
 
 		nct = self._SESSION.execute(f"SELECT COUNT (*) FROM {self.NEWCUS_TBL}").fetchone()[0]
-		print("there are {} rows now in {}".format(nct, self.NEWCUS_TBL))
 
 		assert nnc == nct, 'incorrect number of new customer ids in temporary table {}!'.format(self.NEWCUS_TBL)
 
 		# now that this temp table is already there, download it using bcp
-		subprocess.run(f"bcp {self.NEWCUS_TBL} out {self.BCP_OPTIONS['temp_new_cust_file']} -c -t: -T -S {self.BCP_OPTIONS['server']}")
+		subprocess.run(f"bcp {self.NEWCUS_TBL} out {self.BCP_OPTIONS['temp_new_cust_file']} -c -T -S {self.BCP_OPTIONS['server']}")
 
 		print('downloaded ids and their full names to {}'.format(self.BCP_OPTIONS["temp_new_cust_file"]))
+
+	
+	@timer
+	def get_ethnicities(self):
+		"""
+		simply apply ethnicity detector on a data frame column with full names
+		"""
+
+		print("detecting ethnicities...")
+
+		for i, c in enumerate(pd.read_csv(self.BCP_OPTIONS["temp_new_cust_file"], sep='\t', dtype={"CustomerID": int, "FullName": str}, 
+											names=["CustomerID", "FullName"], error_bad_lines=False, 
+												chunksize=self.CHNK, encoding='latin-1', header=None)):
+
+			c['Ethnicity'] = c["FullName"].apply(self.ed.get_ethnicity)
+			# note that now c has columns CustomerID, FullName and Ethnicity
+			c = c.loc[c.Ethnicity.notnull(),:]
+
+			if len(c) > 0:
+				self._detected_ethnicities = pd.concat([self._detected_ethnicities, c])
+
+			print('ethnicity detector: processed {} customer ids...'.format((i+1)*self.CHNK))
+
+		self._detected_ethnicities["AssignedOn"] = arrow.utcnow().to('Australia/Sydney').format('DD-MM-YYYY')
+		self._detected_ethnicities.to_csv(self.BCP_OPTIONS["temp_csv_file"], index=False, sep='\t', encoding='latin-1')
+
+		print("done. total {} ethnicities detected".format(len(self._detected_ethnicities)))
+
+		return self
+
+	def _recreate_table(self, table_name, table_fmt, if_exists='do_nothing'):
+
+		try:
+			self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
+		except exc.OperationalError:  # this comes up if table elready exists
+			# means drop didn't work
+			if if_exists == 'create_new':
+				self._SESSION.execute(" ".join(["DROP TABLE", table_name]))
+				self._SESSION.execute(" ".join(["CREATE TABLE", table_name, table_fmt]))
+			elif if_exists == 'do_nothing':
+				pass
+
+		print('re-created table {}'.format(table_name))
 	
 	@timer
 	def update_ethnicity_table(self):
@@ -165,18 +166,14 @@ class TableHandler(object):
 
 		nc_temp_table = self._SESSION.execute(f"SELECT COUNT (*) FROM {self.TEMP_TABLE}").fetchone()[0]
 
-		print("currently {} rows in temporary table {}".format(nc_temp_table, self.TEMP_TABLE))
-		
 		# create a format file for bcp (from the temporary table, it's the same as format for target table)
 		print('creating a format file for bcp...', end='')
 		subprocess.run(f'bcp {self.TEMP_TABLE} format nul -x -f {self.BCP_OPTIONS["format_file"]}  -c -T -S {self.BCP_OPTIONS["server"]}')
 		print("ok")
 
-		subprocess.run(f'bcp {self.TEMP_TABLE} in {self.BCP_OPTIONS["temp_csv_file"]} -T -S {self.BCP_OPTIONS["server"]} -f {self.BCP_OPTIONS["format_file"]}')	
+		subprocess.run(f'bcp {self.TEMP_TABLE} in {self.BCP_OPTIONS["temp_csv_file"]} -T -S {self.BCP_OPTIONS["server"]} -f {self.BCP_OPTIONS["format_file"]} -F 2')	
 		
 		nc_temp_table_now = self._SESSION.execute(f"SELECT COUNT (*) FROM {self.TEMP_TABLE}").fetchone()[0]
-
-		print("currently {} rows in temporary table {}".format(nc_temp_table_now, self.TEMP_TABLE))
 		
 		# now append the ethnicities in temporary table to the target table (replace those already there)
 		self._recreate_table(self.TAR_TABLE, self.TAR_TABLE_FORMAT, 'do_nothing')
@@ -203,7 +200,7 @@ class TableHandler(object):
 	
 	def send_email(self):
 
-		print("sending email notification...")
+		print("sending email notification...", end='')
 		
 		sender_email, sender_pwd, smtp_server, smpt_port, recep_emails = [line.split("=")[-1].strip() 
 									for line in open("config/email.cnf", "r").readlines() if line.strip()]
@@ -212,7 +209,7 @@ class TableHandler(object):
 		
 		msg['From'] = sender_email
 		msg['To'] = recep_emails
-		msg['Subject'] = 'ethnicity update: {} new'.format(len(self._detected_ethnicities))
+		msg['Subject'] = 'ethnicity update: {} new between {} and today'.format(len(self._detected_ethnicities), arrow.utcnow().shift(days=-days).to('Australia/Sydney').humanize())
 		
 		if len(self._detected_ethnicities) < 1:
 
@@ -229,6 +226,9 @@ class TableHandler(object):
 				ns = 3 if len(this_ethnicity) > 2 else 1
 				dsample = pd.concat([dsample, this_ethnicity.sample(n=ns)])
 	
+			
+			dsample["Ethnicity"] = dsample["Ethnicity"].str.upper()
+
 			st_summary  = "-- new ethnic customer ids captured:\n\n" + \
 					"".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
 						for k, v in Counter(self._detected_ethnicities['Ethnicity']).items()], key=lambda x: x[1], reverse=True)])

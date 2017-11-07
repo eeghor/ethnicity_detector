@@ -130,14 +130,14 @@ class TableHandler(object):
 
         # first just get the number of interesting customers on Lotus
         NROWS_SRC = self._ENGINE.execute(" ".join(["SELECT COUNT (*) FROM", self.SRC_TABLE , "WHERE",
-                                                        self.QRY_TIMESPAN["last_7_days"]["qry"]])).fetchone()[0]
+                                                        self.QRY_TIMESPAN["before_today"]["qry"]])).fetchone()[0]
 
         print('there are {} rows to analyse in {}...'.format(NROWS_SRC, self.SRC_TABLE))
 
 
         self._CUST_TO_CHECK = pd.read_sql("SELECT [CustomerID], "
                              "ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],'') as [full_name] "
-                            "FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["last_7_days"]["qry"], 
+                            "FROM " + self.SRC_TABLE + " WHERE " + self.QRY_TIMESPAN["before_today"]["qry"], 
                             self._ENGINE)
 
         self.get_ethnicities_parallel()
@@ -185,7 +185,7 @@ class TableHandler(object):
         
         msg['From'] = sender_email
         msg['To'] = recep_emails
-        msg['Subject'] = 'ethnicities: customers created or modified {}'.format(self.QRY_TIMESPAN["last_7_days"]["descr"])
+        msg['Subject'] = 'ethnicities: customers created or modified {}'.format(self.QRY_TIMESPAN["before_today"]["descr"])
         
         dsample = pd.DataFrame()
 
