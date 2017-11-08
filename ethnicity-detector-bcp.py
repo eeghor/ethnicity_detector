@@ -47,14 +47,17 @@ class TableHandler(object):
 	"""
 	def __init__(self, server, user, port, user_pwd, db_name,
 					src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
-						tar_table='[TEGA].[dbo].[CustomerEthnicities8]',
-							days=3):
+						tar_table='[TEGA].[dbo].[CustomerEthnicities]',
+							days=4380):
 		
+		self.DAYS = days
 		self.SRC_TABLE = src_table       # where we take customer id and name from 
 		self.TAR_TABLE = tar_table
 
 		self.CHNK = 40000  # process ethnicities by CHNK (in rows)
 		self.NEWCUS_TBL = 'TEGA.dbo.tempNewCIDs'
+
+		self.TAR_TABLE_COLUMN_NAMES = {"CustomerID", "FullName", "Ethnicity", "AssignedOn"}
 
 		self.TAR_TABLE_FORMAT = "(CustomerID int, FullName nvarchar(100), Ethnicity nvarchar(50), AssignedOn nvarchar(20))"
 
@@ -176,7 +179,31 @@ class TableHandler(object):
 		nc_temp_table_now = self._SESSION.execute(f"SELECT COUNT (*) FROM {self.TEMP_TABLE}").fetchone()[0]
 		
 		# now append the ethnicities in temporary table to the target table (replace those already there)
-		self._recreate_table(self.TAR_TABLE, self.TAR_TABLE_FORMAT, 'do_nothing')
+		# does the target table even exist?
+
+		sch = self.TAR_TABLE.split('.')[-2].replace('[','').replace(']','').strip()
+		nm = self.TAR_TABLE.split('.')[-1].replace('[','').replace(']','').strip()
+
+		# cname_tuples will be None if something goes wrong
+		cname_tuples = self._SESSION.execute(f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE "
+				f"(table_schema = '{sch}') and (table_name = '{nm}')").fetchall()
+		if cname_tuples:
+			target_colnames = {tp[0] for tp in cname_tuples}
+			print('found the following column names in target table {}: {}'.format(target_colnames, self.TAR_TABLE))
+			if target_colnames == self.TAR_TABLE_COLUMN_NAMES:   # all the right column names
+				pass
+			else:
+				self._SESSION.execute(f"DROP TABLE {self.TAR_TABLE}")
+				self._SESSION.execute(f"CREATE TABLE {self.TAR_TABLE} {self.TAR_TABLE_FORMAT}")	
+		else:
+			# if that didn't work out, assume it's because there's no target table
+			try:
+				self._SESSION.execute(f"CREATE TABLE {self.TAR_TABLE} {self.TAR_TABLE_FORMAT}")
+				print("created new target table {}".format(self.TAR_TABLE))
+			except exc.OperationalError: # looks like table does exist?
+				print('target table {} appers to exist, something wrong.. '.format(self.TAR_TABLE))
+
+		#self._recreate_table(self.TAR_TABLE, self.TAR_TABLE_FORMAT, 'do_nothing')
 
 		nc_target_table_now = self._SESSION.execute(f"SELECT COUNT (*) FROM {self.TAR_TABLE}").fetchone()[0]
 		print("rows in target table {} before update: {}".format(self.TAR_TABLE, nc_target_table_now))
@@ -209,7 +236,7 @@ class TableHandler(object):
 		
 		msg['From'] = sender_email
 		msg['To'] = recep_emails
-		msg['Subject'] = 'ethnicity update: {} new between {} and today'.format(len(self._detected_ethnicities), arrow.utcnow().shift(days=-days).to('Australia/Sydney').humanize())
+		msg['Subject'] = 'ethnicity update: {} new between {} and today'.format(len(self._detected_ethnicities), arrow.utcnow().shift(days=-self.DAYS).to('Australia/Sydney').humanize())
 		
 		if len(self._detected_ethnicities) < 1:
 
@@ -227,7 +254,7 @@ class TableHandler(object):
 				dsample = pd.concat([dsample, this_ethnicity.sample(n=ns)])
 	
 			
-			dsample["Ethnicity"] = dsample["Ethnicity"].str.upper()
+			dsample["FullName"] = dsample["FullName"].str.upper()
 
 			st_summary  = "-- new ethnic customer ids captured:\n\n" + \
 					"".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
@@ -258,7 +285,7 @@ if __name__ == '__main__':
 		
 		tc.send_email()
 
-	schedule.every().day.at('18:05').do(job)
+	schedule.every().day.at('12:48').do(job)
 	
 	while True:
 

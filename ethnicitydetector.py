@@ -130,27 +130,34 @@ class EthnicityDetector(object):
 				if ethnicity in self.deciders["name_only"] | self.deciders["name_or_surname"]:
 					oked.add(ethnicity)
 		
-		res = None if not oked else "|".join(sorted(oked))
+		if not oked:
+			return None 
 
 		# some extra filtering for chinese
-		if res == 'chinese':
+
+		asian = {'chinese', 'korean', 'japanese'}
+
+		if asian & oked:
 
 			name_parts = st.split()
 
 			if len(name_parts) > 2:
 				if (name_parts[-2] in ['da', 'de', 'del', 'della', 'dos', 'van']) and (len(name_parts[-1]) > 3):
-					res = None
+					oked -= asian
 			elif len(name_parts) == 2:
-				if (name_parts[0] == 'bo') and (len(name_parts[1]) > 4):
-					res = None
+				if (name_parts[0] in {'joe', 'lee', 'bo', 'su', 'lou', 'kim', 'jo', 'li', 'ken', 'juan'}) and (len(name_parts[1]) > 3):
+					oked -= asian
 				if (len(name_parts[0]) > 4) and (name_parts[1] == 'long'):
-					res = None
+					oked -= asian
+
+
+		res = None if not oked else "|".join(sorted(oked))
 
 		# if too many possible ethnicities discard all
 		if res and (res.count("|") > 2):
 			res = None
 			
-		return res
+		return res 
 
 if __name__ == '__main__':
 
