@@ -13,7 +13,7 @@ class EthnicityDetector(object):
 	
 	def __init__(self, name_data_path="/Users/ik/Data/names/", eth_lst=["indian", "japanese", "greek", "arabic", "turkish",
 																			"thai", "vietnamese", "balkan", "italian",  "samoan",
-																			"hawaiian", "khmer", "chinese", "korean"] ):
+																				"hawaiian", "khmer", "chinese", "korean", "polish"] ):
 		self.NAME_DATA_DIR = name_data_path
 		self.ETHNICITY_LIST = eth_lst
 		# print(self.ETHNICITY_LIST)
@@ -23,12 +23,12 @@ class EthnicityDetector(object):
 		self.name_dict = json.load(open(self.NAME_DATA_DIR + "names_26092017.json", "r"))
 		self.surname_dict = json.load(open(self.NAME_DATA_DIR + "surnames.json", "r"))
 		self.names_international = {line.strip().lower() for line in open(self.NAME_DATA_DIR + "names_international.txt", "r").readlines() if line}
-		self.surname_ending_dict = json.load(open(self.NAME_DATA_DIR + "surname_endings_06102017.json", "r"))
+		self.surname_ending_dict = json.load(open(self.NAME_DATA_DIR + "surname_endings.json", "r"))
 		
 		# note: name AND surname exactly matched is the obvious choice
-		self.deciders = {"name_or_surname": {"indian", "japanese", "greek", "chinese"},
-							"name_only": {"thai", "arabic", "turkish", "hawaiian", "samoan", "khmer"},
-								"surname_only": {"vietnamese", "balkan", "italian", "korean"}}
+		self.deciders = {"name_or_surname": {"indian", "japanese", "chinese"},
+							"name_only": {"thai", "arabic", "turkish", "hawaiian", "samoan", "khmer", "polish"},
+								"surname_only": {"vietnamese", "balkan", "italian", "korean", "greek"}}
 		
 		assert set(self.ETHNICITY_LIST) == {e for dec in self.deciders for e in self.deciders[dec]}, "ERROR! missing deciders!"
 
@@ -76,7 +76,7 @@ class EthnicityDetector(object):
 
 		mtchd = {"name": set(), "surname": set()}
 		
-		for name_prt in st.split():
+		for j, name_prt in enumerate(st.split()):
 
 			if len(name_prt) < 2:
 				continue
@@ -98,7 +98,11 @@ class EthnicityDetector(object):
 						if ethnicity in self.surname_ending_dict:
 							for ending in self.surname_ending_dict[ethnicity]:
 								if name_prt.endswith(ending) and (len(name_prt) - len(ending) > 1):
-									mtchd["surname"].add(ethnicity)
+									if ethnicity in {'italian', 'balkan', 'greek'}:
+										if j > 0:
+											mtchd["surname"].add(ethnicity)
+									else:
+										mtchd["surname"].add(ethnicity)
 				# print("after surname search:", mtchd)
 				# search for name
 				if name_prt in self.names_international:
@@ -149,6 +153,8 @@ class EthnicityDetector(object):
 					oked -= asian
 				if (len(name_parts[0]) > 4) and (name_parts[1] == 'long'):
 					oked -= asian
+			if 'nguyen' in name_parts:
+				oked -= asian
 
 
 		res = None if not oked else "|".join(sorted(oked))
