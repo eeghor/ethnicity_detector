@@ -48,7 +48,7 @@ class TableHandler(object):
 	def __init__(self, server, user, port, user_pwd, db_name,
 					src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
 						tar_table='[TEGA].[dbo].[CustomerEthnicities]',
-							days=4380):
+							days=10):
 		
 		self.DAYS = days
 		self.SRC_TABLE = src_table       # where we take customer id and name from 
@@ -104,9 +104,9 @@ class TableHandler(object):
 
 		self._recreate_table(self.NEWCUS_TBL, '(CustomerID int, FullName nvarchar(100))', 'create_new')
 
-		self._SESSION.execute(("INSERT INTO " + self.NEWCUS_TBL + " SELECT CustomerID, "
-			  "CAST (RTRIM(LTRIM(REPLACE( SUBSTRING( ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],''), 1, 100), '  ', ' '))) as nvarchar(50)) as [FullName] "
-			  "FROM " + self.SRC_TABLE + " " + self.WHERE_QRY))
+		self._SESSION.execute(f"INSERT INTO {self.NEWCUS_TBL} SELECT CustomerID, "
+			  f"CAST (RTRIM(LTRIM(REPLACE(SUBSTRING(ISNULL([FirstName],'') + ' ' + ISNULL([MiddleName],'') + ' ' + ISNULL([LastName],''), 1, 100), '  ', ' '))) as nvarchar(50)) as [FullName] "
+			  f"FROM {self.SRC_TABLE} {self.WHERE_QRY}")
 
 		nct = self._SESSION.execute(f"SELECT COUNT (*) FROM {self.NEWCUS_TBL}").fetchone()[0]
 
@@ -240,7 +240,7 @@ class TableHandler(object):
 		
 		if len(self._detected_ethnicities) < 1:
 
-			msg.attach(MIMEText('no new ethnicities, nothing much to say..', 'plain'))
+			msg.attach(MIMEText('no new ethnicities, nothing to see here..', 'plain'))
 
 		else:
 
@@ -285,7 +285,7 @@ if __name__ == '__main__':
 		
 		tc.send_email()
 
-	schedule.every().day.at('12:48').do(job)
+	schedule.every().day.at('12:00').do(job)
 	
 	while True:
 
