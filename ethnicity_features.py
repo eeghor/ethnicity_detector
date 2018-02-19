@@ -17,8 +17,8 @@ class Selector(BaseEstimator, TransformerMixin):
 
 class MakeDense(BaseEstimator, TransformerMixin):
 
-	def __init__(self, col_name):
-		self.col_name = col_name
+	def __init__(self):
+		pass
 	
 	def fit(self, x, y=None):
 		return self
