@@ -3,34 +3,42 @@ import json
 import time
 from unidecode import unidecode
 from collections import defaultdict
-from string import ascii_lowercase   # 'abcdefghijklmnopqrstuvwxyz'
+from string import ascii_lowercase
+
+import os
 
 class EthnicityDetector(object):
 
 	"""
-	detect ethnicity given a string containing a full name
+	detect ethnicity given a string containing a full name;
+	update 26/03/2018: all data is now expected to be in 'data' directory
 	"""
 	
-	def __init__(self, name_data_path="/Users/ik/Data/names/", eth_lst=["indian", "japanese", "greek", "arabic", "turkish",
-																			"thai", "vietnamese", "balkan", "italian",  "samoan",
-																				"hawaiian", "khmer", "chinese", "korean", "polish"] ):
-		self.NAME_DATA_DIR = name_data_path
-		self.ETHNICITY_LIST = eth_lst
-		# print(self.ETHNICITY_LIST)
+	def __init__(self):
+
+		self.NAME_DATA_DIR = os.path.join(os.path.curdir, 'data')
+
+		self.ETHNICITY_LIST = """indian japanese greek arabic turkish
+									thai vietnamese balkan italian  samoan
+										hawaiian khmer chinese korean polish""".split()
+
+		print(f'total ethnicities: {len(self.ETHNICITY_LIST)}')
+
 		self.SEPARATORS = re.compile(r'[-,_/().]')
 		
 		# load name and surname databases
-		self.name_dict = json.load(open(self.NAME_DATA_DIR + "names_26092017.json", "r"))
-		self.surname_dict = json.load(open(self.NAME_DATA_DIR + "surnames.json", "r"))
-		self.names_international = {line.strip().lower() for line in open(self.NAME_DATA_DIR + "names_international.txt", "r").readlines() if line}
-		self.surname_ending_dict = json.load(open(self.NAME_DATA_DIR + "surname_endings.json", "r"))
+		self.name_dict = json.load(open(os.path.join(self.NAME_DATA_DIR, 'names.json'), "r"))
+		self.surname_dict = json.load(open(os.path.join(self.NAME_DATA_DIR, 'surnames.json'), "r")) 
+		self.names_international = {line.strip().lower() 
+						for line in open(os.path.join(self.NAME_DATA_DIR, 'names_international.txt'),'r').readlines() if line}
+		self.surname_ending_dict = json.load(open(os.path.join(self.NAME_DATA_DIR, 'surname_endings.json'), "r"))
 		
 		# note: name AND surname exactly matched is the obvious choice
 		self.deciders = {"name_or_surname": {"indian", "japanese", "chinese"},
 							"name_only": {"thai", "arabic", "turkish", "hawaiian", "samoan", "khmer", "polish"},
 								"surname_only": {"vietnamese", "balkan", "italian", "korean", "greek"}}
 		
-		assert set(self.ETHNICITY_LIST) == {e for dec in self.deciders for e in self.deciders[dec]}, "ERROR! missing deciders!"
+		assert set(self.ETHNICITY_LIST) == {e for dec in self.deciders for e in self.deciders[dec]}, "ERROR! missing decider(s)!"
 
 		# make name and surname dictionaries by letter for required ethnicities
 		self.names = dict()
@@ -53,13 +61,16 @@ class EthnicityDetector(object):
 
 		if len(st.strip()) < 3:
 			return None
-		#print("string=",st, " type=", type(st))
+
 		# get ASCII transliteration of Unicode (to avoid, for example, Spanish letters)
 		st = unidecode(st.lower())
+
 		# replace separators with white spaces
 		st = re.sub(self.SEPARATORS,' ', st)
+
 		# remove all non-letters
 		_ = ''.join([c for c in st if c in ascii_lowercase + ' ']).strip()
+
 		if not _:
 			return None
 
@@ -76,58 +87,47 @@ class EthnicityDetector(object):
 
 		mtchd = {"name": set(), "surname": set()}
 		
-		for j, name_prt in enumerate(st.split()):
+		for j, word in enumerate(st.split()):
 
-			if len(name_prt) < 2:
+			if len(word) < 2:
 				continue
 			else:
-				first_l = name_prt[0]   # first letter 
-				# print("1st letter: ",first_l)              
-				# try to match exact last name
-				# print("matching exact surname..")
+				first_l = word[0]  
 				for ethnicity in self.ETHNICITY_LIST:
 					try:
-						if name_prt in self.surnames[ethnicity][first_l]:
+						if word in self.surnames[ethnicity][first_l]:
 							mtchd["surname"].add(ethnicity)
 					except:
 						pass
 				# if exact match didn't work, try last name endings
-				if (not mtchd["surname"]):
-					# print('couldnt match exactly, looking at endings..')
+				if not mtchd["surname"]:
 					for ethnicity in self.ETHNICITY_LIST:
 						if ethnicity in self.surname_ending_dict:
 							for ending in self.surname_ending_dict[ethnicity]:
-								if name_prt.endswith(ending) and (len(name_prt) - len(ending) > 1):
+								if word.endswith(ending) and (len(word) - len(ending) > 1):
 									if ethnicity in {'italian', 'balkan', 'greek'}:
 										if j > 0:
 											mtchd["surname"].add(ethnicity)
 									else:
 										mtchd["surname"].add(ethnicity)
-				# print("after surname search:", mtchd)
 				# search for name
-				if name_prt in self.names_international:
-					# print('international name!')
+				if word in self.names_international:
 					continue
 				else:
-					# print("name not international..")
 					for ethnicity in self.ETHNICITY_LIST:
 						try:
-							# print("trying to match name..")
-							if name_prt in self.names[ethnicity][first_l]:
+							if word in self.names[ethnicity][first_l]:
 								mtchd["name"].add(ethnicity)
-								# print("matched name ", ethnicity)
 						except:
-							# print("didnt find in names")
 							pass
 	   
 		# maybe there's an ethnicity we found both name and surname for
+
 		oked  = mtchd["surname"] & mtchd["name"]
-		# print("both name and surmame?", oked)
 
 		if not oked:
 
 			for ethnicity in mtchd["surname"]:
-				# print("chekcing deciders for ", ethnicity)
 				if ethnicity in self.deciders["surname_only"] | self.deciders["name_or_surname"]:
 					oked.add(ethnicity)
 			for ethnicity in mtchd["name"]:
@@ -136,8 +136,6 @@ class EthnicityDetector(object):
 		
 		if not oked:
 			return None 
-
-		# some extra filtering for chinese
 
 		asian = {'chinese', 'korean', 'japanese'}
 
@@ -153,6 +151,7 @@ class EthnicityDetector(object):
 					oked -= asian
 				if (len(name_parts[0]) > 4) and (name_parts[1] == 'long'):
 					oked -= asian
+
 			if 'nguyen' in name_parts:
 				oked -= asian
 
@@ -168,4 +167,4 @@ class EthnicityDetector(object):
 if __name__ == '__main__':
 
 	ed = EthnicityDetector()
-	print(ed.get_ethnicity('panos mesut'))
+	print(ed.get_ethnicity('tomasz mozolli'))
