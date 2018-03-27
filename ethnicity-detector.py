@@ -55,12 +55,14 @@ class TableHandler(object):
     Class to connect to tables and get or upload stuff from/to tables
     """
     def __init__(self, server, user, port, user_pwd, db_name,
-                    src_table='[DWSales].[dbo].[tbl_LotusCustomer]', 
-                        target_table='CustomerEthnicities_junk', days=6, chsize=200000):
+                    src_table='DWSales.dbo.tbl_LotusCustomer', 
+                        target_table='TEGA.dbo.CustomerEthnicities_16', days=17, chsize=200000):
         
         self.SRC_TABLE = src_table   # where we take customer id and name from 
         self.TARGET_TABLE = target_table
         self.DAYS = days
+
+        self.CUSTID = 'CustomerID'
 
         self._SESSION = sessionmaker(autoflush=False, autocommit=True)
         self._ENGINE = sa.create_engine(f'mssql+pymssql://{user}:{user_pwd}@{server}:{port}/{db_name}')
@@ -68,7 +70,7 @@ class TableHandler(object):
 
         self.sess = self._SESSION()
 
-        self.TEMP_TABLE = "tempo_table"
+        self.TEMP_TABLE = "TEGA.dbo.tempo_LARGE_table"
 
         # today as a time stamp
         _today_ts = arrow.utcnow().to('Australia/Sydney')
@@ -112,6 +114,23 @@ class TableHandler(object):
                     schema="TEGA.dbo",
                     chunksize=None if len(df_upload) <= 200000 else 200000)
 
+    def exists(self, tab):
+        """
+        check if a table tab exists
+        """
+        return self.sess.execute(f""" IF OBJECT_ID(N'{tab}', N'U') IS NOT NULL
+                                            SELECT 1
+                                        ELSE
+                                            SELECT 0
+                                          """).fetchone()[0]
+
+    def count_rows(self, tab):
+        """
+        count how many rows in table tab
+        """
+        return self._ENGINE.execute(f'SELECT COUNT (*) FROM {tab};').fetchone()[0]
+
+
     @timer
     def get_ethnicities_parallel(self):
 
@@ -154,12 +173,13 @@ class TableHandler(object):
 
 
         self._CUST_TO_CHECK = pd.read_sql(f"""
-                                            SELECT CustomerID,
+                                            SELECT {self.CUSTID},
                                             ISNULL(FirstName,'') + ' ' + ISNULL(MiddleName,'') + ' ' + ISNULL(LastName,'') as full_name
                                             FROM {self.SRC_TABLE} 
                                             WHERE {self.QRY_TIMESPAN}
                                             """,
                                             self._ENGINE)
+        print(self._CUST_TO_CHECK.head())
 
         # self.get_ethnicities_parallel()
 
@@ -183,48 +203,100 @@ class TableHandler(object):
             self._detected_ethnicities["AssignedOn"] = self.TODAY_SYD
 
             # upload all detected ethnicities into a temporary table
+            print(f'attempting to run .to_sql to make table {self.TEMP_TABLE}')
+
             self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
                 if_exists='replace', index=False, 
                     dtype={"CustomerID": sa.types.String(length=20)}, 
                     schema="TEGA.dbo", 
-                    chunksize=(None if len(self._detected_ethnicities) <= 200000 else 200000))
+                    chunksize=(None if len(self._detected_ethnicities) <= 1000 else 1000))
+            print('ok')
 
-            ROWS_TMP = self._ENGINE.execute(f'SELECT COUNT (*) FROM {self.TEMP_TABLE};').fetchone()[0]
+            print(f'temp table has {self.count_rows(self.TEMP_TABLE)} rows')
+
+            if self.exists(self.TARGET_TABLE):
+
+                _b = self.count_rows(self.TARGET_TABLE)
+
+                print(f'target table EXISTS and has {_b} rows')
+            else:
+                print('target table doesnt exist...')
+
+                self.sess.execute(f"CREATE TABLE {self.TARGET_TABLE} (CustomerID int, Ethnicity nvarchar(50), AssignedOn nvarchar(20))")
                 
-            print("made a temporary table with {} rows [{:.0f} min {:.0f} sec]...".format(ROWS_TMP, *divmod(time.time() - t_start, 60)))
-            sys.exit(0)
-            
-            try:
-                self.sess.execute(f"""
-                                    DELETE FROM {self.TARGET_TABLE} 
-                                    WHERE CustomerID in (SELECT CustomerID FROM {self.TEMP_TABLE});""")
+                self.sess.execute(f'INSERT INTO {self.TARGET_TABLE} (CustomerID, Ethnicity) SELECT CustomerID, Ethnicity FROM {self.TEMP_TABLE}')
+                # try:
 
-                print("deleted cids already in ethnicity table [{:.0f} min {:.0f} sec]...".format(*divmod(time.time() - t_start, 60)))
+                #     _b = self.count_rows(self.TARGET_TABLE)
+
+                #     self.sess.execute(f"""
+                #                     DELETE FROM {self.TARGET_TABLE} 
+                #                     WHERE {self.CUSTID} in (SELECT {self.CUSTID} FROM {self.TEMP_TABLE});""")
+
+                #     _a = self.count_rows(self.TARGET_TABLE)
+
+                #     print(f'deleted {_a - _b} customer ids from {self.TARGET_TABLE}')
+
+                # except:
+
+                #     print('couldn\'t delete from the target table although it does exits!')
+            if self.exists(self.TARGET_TABLE):
+
+                _b = self.count_rows(self.TARGET_TABLE)
+
+                print(f'NOW target table EXISTS and has {_b} rows')
+
+            sys.exit(0)
+
+            try:
+                print("merging..")
 
                 self.sess.execute(f"""
                                 MERGE {self.TARGET_TABLE} AS TARGET
                                 USING {self.TEMP_TABLE} AS SOURCE
-                                ON (TARGET.CustomerID = SOURCE.CustomerID)
+                                ON TARGET.CustomerID = SOURCE.CustomerID
                                 WHEN MATCHED AND (TARGET.Ethnicity <> SOURCE.Ethnicity)
-                                THEN UPDATE TARGET.Ethnicity = SOURCE.Ethnicity
-                                WHEN NOT MATCHED BY TARGET THEN
-                                INSERT (CustomerID, Ethnicity)
-                                VALUES (SOURCE.CustomerID, SOURCE.Ethnicity)
+                                THEN
+                                UPDATE
+                                SET TARGET.Ethnicity = SOURCE.Ethnicity
+                                WHEN NOT MATCHED BY TARGET
+                                THEN
+                                INSERT (CustomerID, Ethnicity, AssignedOn)
+                                VALUES (SOURCE.CustomerID, SOURCE.Ethnicity, SOURCE.AssignedOn);
                                 """)
+                print('done')
+                _a = self.count_rows(self.TARGET_TABLE)
+                print(f'target table NOW  has {_a} rows: {_a - _b} change')
 
             except:
-                
-                print(f'apparently, the target table {self.TARGET_TABLE} doesn\'t yet exist..')
-                self.sess.execute(f"""
-                                SELECT * INTO {self.TARGET_TABLE}
-                                FROM {self.TEMP_TABLE};
-                                """)
-            
+                print('cant MERGE!')
+            # else:
+
+            #     print('does target exist?')
+            #     print(self.exists(self.TARGET_TABLE))
+
+                # self.sess.execute(f"""
+                #                     SELECT * INTO {self.TARGET_TABLE}
+                #                     FROM {self.TEMP_TABLE};
+                #                     """)
+
+                # print('done select into..')
+
+                # print(self.exists(self.TARGET_TABLE))
+
+                # print(f'SELECT COUNT (*) FROM {self.TARGET_TABLE};')
+
+                # _a= self._ENGINE.execute(f'SELECT COUNT (*) FROM {self.TARGET_TABLE};').fetchone()[0]
+
+            print(f'now rows in {self.TARGET_TABLE}: {self.count_rows(self.TARGET_TABLE)}')
+                  
             
             print("update complete [{:.0f} min {:.0f} sec]...".format(*divmod(time.time() - t_start, 60)))
     
     
     def send_email(self):
+
+        print("sending email notification...", end='')
         
         sender_email, sender_pwd, smtp_server, smpt_port, recep_emails = [line.split("=")[-1].strip() 
                                     for line in open("config/email.cnf", "r").readlines() if line.strip()]
@@ -233,24 +305,37 @@ class TableHandler(object):
         
         msg['From'] = sender_email
         msg['To'] = recep_emails
-        msg['Subject'] = 'ethnicities'
+        msg['Subject'] = 'ethnicity update: {} new between {} and today'.format(len(self._detected_ethnicities), arrow.utcnow().shift(days=-self.DAYS).to('Australia/Sydney').humanize())
         
-        dsample = pd.DataFrame()
+        if len(self._detected_ethnicities) < 1:
 
-        for k, v in Counter(self._detected_ethnicities['Ethnicity']).items():
-            this_ethnicity = self._detected_ethnicities[self._detected_ethnicities.Ethnicity == k]
-            ns = 3 if len(this_ethnicity) > 2 else 1
-            dsample = pd.concat([dsample, this_ethnicity.sample(n=ns)])
+            msg.attach(MIMEText('no new ethnicities, nothing to see here..', 'plain'))
 
-        st_summary  = "-- new ethnic customer ids captured:\n\n" + \
-                "".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
-                    for k, v in Counter(self._detected_ethnicities['Ethnicity']).items()], key=lambda x: x[1], reverse=True)])
+        else:
+
+            dsample = pd.DataFrame()
+    
+            for k, v in Counter(self._detected_ethnicities['Ethnicity']).items():
+                
+                # recall "CustomerID", "FullName", "Ethnicity", "AssignedOn"
+                this_ethnicity = self._detected_ethnicities[self._detected_ethnicities.Ethnicity == k]
+                ns = 3 if len(this_ethnicity) > 2 else 1
+                dsample = pd.concat([dsample, this_ethnicity.sample(n=ns)])
+    
+            
+            dsample["FullName"] = dsample["FullName"].str.upper()
+
+            st_summary  = "-- new ethnic customer ids captured:\n\n" + \
+                    "".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
+                        for k, v in Counter(self._detected_ethnicities['Ethnicity']).items()], key=lambda x: x[1], reverse=True)])
+            
+            msg.attach(MIMEText(st_summary+ "\n-- sample:\n\n" + dsample.loc[:,["CustomerID", "FullName", "Ethnicity"]].to_string(index=False, justify="left",
+                formatters=[lambda _: "{:<12}".format(str(_).strip()), 
+                lambda _: "{:<30}".format(str(_).strip()), 
+                lambda _: "{:<20}".format(str(_).strip())]), 'plain'))
         
-        msg.attach(MIMEText(st_summary+ "\n-- sample:\n\n" + dsample.loc[:,["CustomerID", "FullName", "Ethnicity"]].to_string(index=False, justify="left",
-            formatters=[lambda _: "{:<12}".format(str(_).strip()), lambda _: "{:<30}".format(str(_).strip()), lambda _: "{:<20}".format(str(_).strip())]), 'plain'))
         server = smtplib.SMTP(smtp_server, smpt_port)
         server.starttls()
-        print('sending email notification...', end='')
         server.login(sender_email, sender_pwd)
         server.sendmail(sender_email, [email.strip() for email in recep_emails.split(";")], msg.as_string())
         print('ok')
@@ -261,7 +346,7 @@ if __name__ == '__main__':
     ed = EthnicityDetector()
     vf = np.vectorize(ed.get_ethnicity)
 
-    tc = TableHandler(**json.load(open("config/conn-01.ini", "r")))
+    tc = TableHandler(**json.load(open("config/conn-02.ini", "r")))
 
     tc.proc_new_customers()
 
@@ -277,6 +362,10 @@ if __name__ == '__main__':
     tc._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(get_array_ethnicity, 
                                     np.array_split(tc._CUST_TO_CHECK.values, AVAIL_CPUS))),
                                 columns=["CustomerID", "Ethnicity"], dtype=str).query('Ethnicity != "None"')
+
+    print('detected:')
+    print(tc._detected_ethnicities.head())
+
     pool.close()
     pool.join()
     
@@ -284,4 +373,4 @@ if __name__ == '__main__':
     print(tc._detected_ethnicities.head())
 
     tc.update_ethnicity_table()
-    tc.send_email()
+    # tc.send_email()
