@@ -19,7 +19,7 @@ class EthnicityDetector(object):
 		self.NAME_DATA_DIR = os.path.join(os.path.curdir, 'data')
 
 		self.ETHNICITY_LIST = """indian japanese greek arabic turkish
-									thai vietnamese balkan italian  samoan
+									thai vietnamese balkan italian samoan
 										hawaiian khmer chinese korean polish""".split()
 
 		print(f'total ethnicities: {len(self.ETHNICITY_LIST)}')
