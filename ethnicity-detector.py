@@ -15,7 +15,10 @@ from sqlalchemy import text
 # for sending an email notification:
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
+
+from jinja2 import Environment, FileSystemLoader
 
 import pymssql
 
@@ -26,6 +29,8 @@ import multiprocessing
 import numpy as np
 
 from ethnicitydetector import EthnicityDetector
+
+import boto3
 
 def timer(func):
     def wrapper(*args, **kwargs):
@@ -55,12 +60,12 @@ class TableHandler(object):
     """
     Class to connect to tables and get or upload stuff from/to tables
     """
-    def __init__(self, server, user, port, user_pwd, db_name, src_table, target_table, **kwargs):
+    def __init__(self, server, user, port, user_pwd, db_name, src_table, target_table, email=None, **kwargs):
 
         if 'days' in kwargs:
             self.DAYS = kwargs['days']
         elif 'years' in kwargs:
-            self.DAYS = kwargs['years']*365
+            self.DAYS = int(round(kwargs['years']*365,0))
         else:
             print('you forgot to specify days or years!')
             sys.exit(0)
@@ -68,6 +73,9 @@ class TableHandler(object):
         
         self.SRC_TABLE = src_table   # where we take customer id and name from 
         self.TARGET_TABLE = target_table
+
+        self.S3_CREDENTIALS = json.load(open('config/creds-s3.json', 'r'))
+
         # self.DAYS = days
 
         self.CUSTID = 'CustomerID'
@@ -127,7 +135,7 @@ class TableHandler(object):
                 else:
                     return str(value)
 
-            _ = ''.join([v for v in value if v.isalnum() or v.isspace()])
+            _ = ''.join([v for v in value if v.isalnum() or (v in {'-','|',' '})]).lower()
 
             if len(_) > 0:
                 return _
@@ -147,7 +155,7 @@ class TableHandler(object):
         # sys.exit(0)
 
         # dtypes to SQL types dictionary
-        dt_to_type = {'int64': 'int', 'object': 'nvarchar(200)'}
+        dt_to_type = {'int64': 'int', 'object': 'varchar(200)'}
 
         try:
             self.sess.execute(f""" drop table {target_tbl} """)
@@ -193,7 +201,7 @@ class TableHandler(object):
                                             SELECT {self.CUSTID},
                                             ISNULL(FirstName,'') + ' ' + ISNULL(MiddleName,'') + ' ' + ISNULL(LastName,'') as FullName
                                             FROM {self.SRC_TABLE} 
-                                            WHERE {self.QRY_TIMESPAN}
+                                            WHERE {self.CUSTID} IS NOT NULL AND {self.QRY_TIMESPAN}
                                             """,
                                             self._ENGINE)
 
@@ -287,7 +295,30 @@ class TableHandler(object):
             
             print("update completed. elapsed time: {:.0f} min {:.0f} sec".format(*divmod(time.time() - t_start, 60)))
     
-    
+    def send_email_sns(self):
+
+        # client = boto3.client('sns', **self.S3_CREDENTIALS)
+        # REGION = 'ap-southeast-2'
+
+        self.TOPIC_ARN = [l.strip() for l in open('config/arn.txt','r').readlines() if l.strip()].pop()
+
+        boto3.client('sns', **self.S3_CREDENTIALS).publish(TopicArn=self.TOPIC_ARN,
+                                                Subject='new ethnicities', 
+                                                    Message='Today\'s ethnicity update: we have identified {} customer IDs with ethnic names!\nThis is for the last {} days.\nNot bad.'.format(len(self._detected_ethnicities), self.DAYS))
+        _html = """<html>
+                <head>
+                 <title>Ethnicities</title>
+                </head
+                <body>
+                <h1>Todays Catchment!</h1>
+                 <p>detailed description here...</p>
+                </body>
+                </html>"""
+
+        boto3.client('sns', **self.S3_CREDENTIALS).publish(TopicArn=self.TOPIC_ARN,
+                                                Subject='and now HTML ethnicities', 
+                                                    Message=_html)
+
     def send_email(self):
 
         print("sending email notification...", end='')
@@ -299,7 +330,7 @@ class TableHandler(object):
         
         msg['From'] = sender_email
         msg['To'] = recep_emails
-        msg['Subject'] = 'ethnicity update: {} new between {} and today'.format(len(self._detected_ethnicities), arrow.utcnow().shift(days=-self.DAYS).to('Australia/Sydney').humanize())
+        msg['Subject'] = f'ethnicity update: {len(self._detected_ethnicities)} new {self.BETWEEN_DAYS.lower()}'
         
         if len(self._detected_ethnicities) < 1:
 
@@ -322,7 +353,7 @@ class TableHandler(object):
             st_summary  = "-- new ethnic customer ids captured:\n\n" + \
                     "".join(["{}: {}\n".format(ks.upper(), vs) for ks, vs in sorted([(k,v) 
                         for k, v in Counter(self._detected_ethnicities['Ethnicity']).items()], key=lambda x: x[1], reverse=True)])
-            
+            print('prepared text')
             msg.attach(MIMEText(st_summary+ "\n-- sample:\n\n" + dsample.loc[:,["CustomerID", "FullName", "Ethnicity"]].to_string(index=False, justify="left",
                 formatters=[lambda _: "{:<12}".format(str(_).strip()), 
                 lambda _: "{:<30}".format(str(_).strip()), 
@@ -335,6 +366,58 @@ class TableHandler(object):
         print('ok')
         server.quit()
 
+
+    def send_email_jinja(self):
+
+        
+        d = defaultdict()
+
+        for i, t in enumerate(Counter(self._detected_ethnicities['Ethnicity']).most_common()[:3], 1):
+            d[f'eth{i}'] = t[0]
+            d[f'eth{i}_n'] = f'{t[1]:,}'
+
+
+        sender_email, sender_pwd, smtp_server, smpt_port, recep_emails = [line.split("=")[-1].strip() 
+                                    for line in open("config/email.cnf", "r").readlines() if line.strip()]
+        
+        email = MIMEMultipart('related')   
+        
+        email['From'] = sender_email
+        email['To'] = recep_emails
+
+        email['Subject'] = f"[ethnicity update] {len(self._detected_ethnicities):,} new between {arrow.utcnow().to('Australia/Sydney').shift(days=-self.DAYS).format('DD/MM/YYYY')} and {arrow.utcnow().to('Australia/Sydney').format('DD/MM/YYYY')}"
+        
+
+        file_loader = FileSystemLoader('templates')
+        env = Environment(loader=file_loader)
+        template = env.get_template('ethnicity_template.html')
+
+        msg_text = template.render(**d, eth_tab=self.TARGET_TABLE)
+
+        # main part is the Jinja2 template
+        email.attach(MIMEText(msg_text,'html'))
+
+        for i in range(1,4):
+
+            p = d[f'eth{i}']
+
+            fp = open(f'templates/img/{p}.png', 'rb')
+            msg_img = MIMEImage(fp.read())
+            fp.close()
+    
+            msg_img.add_header('Content-ID', f'<img/{p}.png>')
+            msg_img.add_header('Content-Disposition', 'inline', filename=f'img/{p}.png')
+    
+            email.attach(msg_img)
+
+        server = smtplib.SMTP(smtp_server, smpt_port)
+        server.starttls()
+        server.login(sender_email, sender_pwd)
+        server.sendmail(sender_email, [email.strip() for email in recep_emails.split(";")], email.as_string())
+
+        server.quit()
+
+
 if __name__ == '__main__':
 
     ed = EthnicityDetector()
@@ -342,30 +425,88 @@ if __name__ == '__main__':
 
     tc = TableHandler(**json.load(open("config/conn-02.ini", "r")), 
                         src_table='DWSales.dbo.tbl_LotusCustomer',
-                        target_table='TEGA.dbo.CustomerEthnicities_20',
-                        years=1)
+                        target_table='TEGA.dbo.CustomerEthnicities_UPDATED',
+                        years=23)
 
     tc.proc_new_customers()
 
     AVAIL_CPUS = multiprocessing.cpu_count()
 
-    print(f'available CPUs: {AVAIL_CPUS}. creating a pool...', end='')
-    pool = multiprocessing.Pool(AVAIL_CPUS)
-    print('ok')
+    ncust = len(tc._CUST_TO_CHECK)
 
-    tc._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(get_array_ethnicity, 
+    if ncust > 9000000:
+
+        chunk_size = 1000000
+
+        num_chunks, extra = divmod(ncust, chunk_size)
+
+        print(f'full chunks: {num_chunks}, extra rows: {extra}')
+
+        dfs = []
+
+        for start in range(0, num_chunks):
+
+            print(f'rows {start*chunk_size} to {(start+1)*chunk_size}...')
+
+            print(f'available CPUs: {AVAIL_CPUS}. creating a pool...', end='')
+            pool = multiprocessing.Pool(AVAIL_CPUS)
+            print('ok')
+
+            b = tc._CUST_TO_CHECK.iloc[start*chunk_size:(start+1)*chunk_size,:]
+
+            res = np.vstack(pool.map(get_array_ethnicity, 
+                                np.array_split(b.values, AVAIL_CPUS)))
+
+            pool.close()
+            pool.join()
+
+            dfs.append(pd.DataFrame(res,
+                                columns=["CustomerID", "FullName", "Ethnicity"],
+                                dtype=str).query('Ethnicity != "None"'))
+            
+
+        if extra:
+
+            print(f'rows {num_chunks*chunk_size} to the last one...')
+
+            print(f'available CPUs: {AVAIL_CPUS}. creating a pool...', end='')
+            pool = multiprocessing.Pool(AVAIL_CPUS)
+            print('ok')
+
+            b = tc._CUST_TO_CHECK.iloc[num_chunks*chunk_size:,:]
+
+            res = np.vstack(pool.map(get_array_ethnicity, 
+                                np.array_split(b.values, AVAIL_CPUS)))
+
+            pool.close()
+            pool.join()
+
+            dfs.append(pd.DataFrame(res,
+                                columns=["CustomerID", "FullName", "Ethnicity"],
+                                dtype=str).query('Ethnicity != "None"'))
+
+        tc._detected_ethnicities = pd.concat(dfs)
+
+    else:
+
+        print(f'available CPUs: {AVAIL_CPUS}. creating a pool...', end='')
+        pool = multiprocessing.Pool(AVAIL_CPUS)
+        print('ok')
+
+        tc._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(get_array_ethnicity, 
             np.array_split(tc._CUST_TO_CHECK.values, AVAIL_CPUS))),
                     columns=["CustomerID", "FullName", "Ethnicity"],
                     dtype=str).query('Ethnicity != "None"')
 
-    pool.close()
-    pool.join()
+        pool.close()
+        pool.join()
+
+    
 
     tc._detected_ethnicities['CustomerID'] = tc._detected_ethnicities['CustomerID'].astype(int)
     tc._detected_ethnicities["AssignedOn"] = tc.TODAY_SYD
 
-    # print(tc._detected_ethnicities.head())
     print(f'total rows with ethnicity: {len(tc._detected_ethnicities)}') 
 
     tc.update_ethnicity_table()
-    tc.send_email()
+    tc.send_email_jinja()

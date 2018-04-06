@@ -20,7 +20,7 @@ class EthnicityDetector(object):
 
 		self.ETHNICITY_LIST = """indian japanese greek arabic turkish
 									thai vietnamese balkan italian samoan
-										hawaiian khmer chinese korean polish""".split()
+										hawaiian khmer chinese korean""".split()
 
 		print(f'total ethnicities: {len(self.ETHNICITY_LIST)}')
 
@@ -35,7 +35,7 @@ class EthnicityDetector(object):
 		
 		# note: name AND surname exactly matched is the obvious choice
 		self.deciders = {"name_or_surname": {"indian", "japanese", "chinese"},
-							"name_only": {"thai", "arabic", "turkish", "hawaiian", "samoan", "khmer", "polish"},
+							"name_only": {"thai", "arabic", "turkish", "hawaiian", "samoan", "khmer"},
 								"surname_only": {"vietnamese", "balkan", "italian", "korean", "greek"}}
 		
 		assert set(self.ETHNICITY_LIST) == {e for dec in self.deciders for e in self.deciders[dec]}, "ERROR! missing decider(s)!"
