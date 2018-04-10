@@ -10,7 +10,6 @@ from string import ascii_lowercase
 
 import sqlalchemy as sa
 from sqlalchemy.orm.session import sessionmaker
-from sqlalchemy import text
 
 # for sending an email notification:
 import smtplib
@@ -40,18 +39,25 @@ def timer(func):
         return res
     return wrapper
 
+def complain_and_exit(txt):
+    print(txt)
+    sys.exit(0)
+
 def get_array_ethnicity(b):  
 
         """
-        IN: numpy array b that has two columns, one contains customer id and another a full name
-        OUT: numpy array with two columns: customer id and ethnicity
+        input: b is a numpy array that has two columns: customer id and full name
         
-        !NOTE: there will be 'None' where no ethnicity has been detected 
+        returns: numpy array with 3 columns: customer id, full name and ethnicity
+        
+        note that there will be 'None' where no ethnicity has been detected 
         """
     
         ets = vf(b[:,-1])  # we assume that the second column contains full names
 
-        stk = np.hstack((b[:,0].reshape(b.shape[0],1), b[:,-1].reshape(b.shape[0],1) ,ets.reshape(b.shape[0],1)))
+        stk = np.hstack((b[:,0].reshape(b.shape[0],1), 
+                        b[:,-1].reshape(b.shape[0],1), 
+                        ets.reshape(b.shape[0],1)))
     
         return stk
 
@@ -60,33 +66,31 @@ class TableHandler(object):
     """
     Class to connect to tables and get or upload stuff from/to tables
     """
-    def __init__(self, server, user, port, user_pwd, db_name, src_table, target_table, email=None, **kwargs):
+    def __init__(self, server, user, port, user_pwd, db_name, src_table, 
+        target_table, temp_table='TEGA.dbo.tempo_LARGE_table', 
+        email=None, **kwargs):
 
         if 'days' in kwargs:
             self.DAYS = kwargs['days']
         elif 'years' in kwargs:
             self.DAYS = int(round(kwargs['years']*365,0))
         else:
-            print('you forgot to specify days or years!')
-            sys.exit(0)
+           complain_and_exit('you must specify days or years!') 
 
         
         self.SRC_TABLE = src_table   # where we take customer id and name from 
         self.TARGET_TABLE = target_table
+        self.TEMP_TABLE = temp_table
 
         self.S3_CREDENTIALS = json.load(open('config/creds-s3.json', 'r'))
 
-        # self.DAYS = days
-
         self.CUSTID = 'CustomerID'
 
+        # initiate session
         self._SESSION = sessionmaker(autocommit=True)
         self._ENGINE = sa.create_engine(f'mssql+pymssql://{user}:{user_pwd}@{server}:{port}/{db_name}')
         self._SESSION.configure(bind=self._ENGINE)
-
         self.sess = self._SESSION()
-
-        self.TEMP_TABLE = "TEGA.dbo.tempo_LARGE_table"
 
         # today as a time stamp
         _today_ts = arrow.utcnow().to('Australia/Sydney')
@@ -97,17 +101,7 @@ class TableHandler(object):
 
         self.BETWEEN_DAYS = f'BETWEEN \'{_days_ago_ts.format("YYYYMMDD")}\' AND \'{_today_ts.format("YYYYMMDD")}\''
         
-        self.QRY_TIMESPAN = f"""
-                                (
-                                  ((ModifiedDate >= CreatedDate) AND (ModifiedDate {self.BETWEEN_DAYS}))
-                                    or
-                                  (CreatedDate {self.BETWEEN_DAYS})
-
-                                )
-                                
-                                and (CustomerListID = 2)
-                            """
-
+        # finally, an empty data frame to store detected ethnicities
         self._detected_ethnicities = pd.DataFrame()
  
 
@@ -125,7 +119,7 @@ class TableHandler(object):
         """
         count how many rows in table tab
         """
-        return self._ENGINE.execute(f'SELECT COUNT (*) FROM {tab};').fetchone()[0]
+        return self.sess.execute(f'SELECT COUNT (*) FROM {tab};').fetchone()[0]
 
     def _make_value(self, value):
 
@@ -141,35 +135,100 @@ class TableHandler(object):
                 return _
             else:
                 return 'NULL'
+
+    def _column_type(self, s, types, examp_tab):
+
+            """
+            s is a series we want to figure out the corresponding SQL Server type for
+            """
+
+            _defaults = {'int64': 'int NOT NULL',
+                         'object': 'varchar(200)'}
+
+            series_type = str(s.dtypes)
+            series_name = s.name
+
+            if types == 'defaults':
+                
+                try:
+                    return _defaults[series_type]
+                except:
+                    # apparently, series type is not int or string
+                    complain_and_exit(f'can\'t figure out column type for {series_name}!')
+
+            if types == 'copy':
+
+                if not examp_tab:
+                    complain_and_exit(f'you forgot to provide an example table to copy column types from!')
+
+
+                TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME = [_.replace('[','').replace(']','').strip() 
+                                                            for _ in examp_tab.split('.')]
+
+                """
+                table information is supposed to be a table with the following columns:
+                TABLE_CATALOG | TABLE_SCHEMA | TABLE_NAME | COLUMN_NAME | ORDINAL_POSITION | COLUMN_DEFAULT
+                IS_NULLABLE | DATA_TYPE | CHARACTER_MAXIMUM_LENGTH
+                so below we expect to get something like [('int', None, 'YES')]:
+                """
+
+                try:
+                    inf_ = self.sess.execute(f""" SELECT DATA_TYPE, 
+                                                         CHARACTER_MAXIMUM_LENGTH, 
+                                                         IS_NULLABLE 
+                                                  FROM INFORMATION_SCHEMA.COLUMNS
+                                                  WHERE
+                                                  TABLE_CATALOG='{TABLE_CATALOG}' AND 
+                                                  TABLE_SCHEMA = '{TABLE_SCHEMA}' AND 
+                                                  TABLE_NAME = '{TABLE_NAME}' AND
+                                                  COLUMN_NAME = '{s.name}';""").fetchall().pop()
+                except:
+                    print(f'problem obtaining table info for {examp_tab}')
+                    sys.exit(0)
+
+                return ' '.join([inf_[0], 
+                                '' if not inf_[1] else '(' + str(inf_[1]) + ')', 
+                                '' if inf_[2].lower() == 'yes' else 'NOT NULL']).strip()
+                
+
+            if types == 'optimal':
+
+                _lengths = [20, 50, 200]
+
+                if series_type == 'int64':
+                    return 'int'
+
+                elif series_type == 'object':
+                    max_len = len(s.max())
+                    return f'varchar({min(_lengths, key=lambda x: x - max_len if x - max_len > 0 else 1000)})'
+                else:
+                    complain_and_exit(f'can\'t figure out column type for {series_name}!')
+
                 
     @timer
-    def upload(self, tbl, target_tbl):
+    def upload_to_temporary_table(self, tbl, target_tbl):
 
         """
-        uploads **any** table tbl to a table target_tbl
+        uploads table tbl to a temporary table target_tbl
         """
 
-        # print('before upload to temp table starts..')
-        # print(tbl[tbl['FullName'].apply(lambda x: 'Lu' == x.strip())])
+        # does the target table even exist? if it does, drop it
 
-        # sys.exit(0)
+        if self.exists(target_tbl):
+            self.sess.execute(f'drop table {target_tbl}')
+        else:
+            print(f'target temporary table {target_tbl} doesn\'t exist')
+        
+        # now create new temporary table
 
-        # dtypes to SQL types dictionary
-        dt_to_type = {'int64': 'int', 'object': 'varchar(200)'}
-
-        try:
-            self.sess.execute(f""" drop table {target_tbl} """)
-        except:
-            print(f'note: didn\'t drop {target_tbl} because it didn\'t exist')
-
-        self.sess.execute(f""" create table {target_tbl} 
-                                ({', '.join([c + ' ' + dt_to_type[tbl.dtypes[i].name] for i, c in enumerate(tbl.columns)])})
+        self.sess.execute(f""" CREATE TABLE {target_tbl} 
+                                ({', '.join([c + ' ' + self._column_type(tbl[c], types='copy', examp_tab=self.TARGET_TABLE) 
+                                                        for c in tbl.columns])})
 
                              """)
         _MAX_ROWS = 1000
 
         # there's a limit of **1,000** rows per query when attempting to insert as below
-
 
         for i in range(divmod(len(tbl), _MAX_ROWS)[0] + 1):
             self.sess.execute(f""" 
@@ -182,26 +241,24 @@ class TableHandler(object):
 
 
     @timer
-    def proc_new_customers(self):
+    def get_new_rows(self):
         
         """
         get all new customers of interest from Lotus and put them into a data frame
         """
 
-        # first just get the number of interesting customers on Lotus
-        NROWS_SRC = self.sess.execute(f"""
-                                            SELECT COUNT (*) FROM {self.SRC_TABLE} 
-                                            WHERE {self.QRY_TIMESPAN}
-                                          """).fetchone()[0]
-
-        print(f'total {NROWS_SRC} rows to analyze in {self.SRC_TABLE}')
-
-
         self._CUST_TO_CHECK = pd.read_sql(f"""
                                             SELECT {self.CUSTID},
                                             ISNULL(FirstName,'') + ' ' + ISNULL(MiddleName,'') + ' ' + ISNULL(LastName,'') as FullName
                                             FROM {self.SRC_TABLE} 
-                                            WHERE {self.CUSTID} IS NOT NULL AND {self.QRY_TIMESPAN}
+                                            WHERE ({self.CUSTID} IS NOT NULL) AND 
+                                            (
+                                                ((ModifiedDate >= CreatedDate) AND (ModifiedDate {self.BETWEEN_DAYS}))
+                                                OR
+                                                (CreatedDate {self.BETWEEN_DAYS})
+
+                                            )
+                                            AND (CustomerListID = 2)
                                             """,
                                             self._ENGINE)
 
@@ -213,75 +270,40 @@ class TableHandler(object):
          
         print("updating ethnicity table..")
 
-        if len(self._detected_ethnicities) < 1:
+        if len(self._detected_ethnicities) == 0:
 
             print("[WARNING]: no new ethnicities to upload!")
 
         else:
 
-            if self.exists(self.TEMP_TABLE):
-                print(f'table {self.TEMP_TABLE} exists and has {self.count_rows(self.TEMP_TABLE)} rows')
-            else:
-                print(f'table {self.TEMP_TABLE} doesn\'t exist')
-
-            t_start = time.time()
-
-            # print(f' now uploading {self._detected_ethnicities.head()} to {self.TEMP_TABLE}')
-            # self._detected_ethnicities.to_sql(self.TEMP_TABLE, self._ENGINE, 
-            #         if_exists='replace',  #  if exists, drop it, recreate and insert data
-            #         index=False, 
-            #         dtype={"CustomerID": sa.types.Integer, 
-            #                 "Ethnicity": sa.types.String,
-            #                 "AssignedOn": sa.types.String}, 
-            #         chunksize=(None if len(self._detected_ethnicities) <= 1000 else 1000))
-
-            self.upload(self._detected_ethnicities, self.TEMP_TABLE)
-
-            print(f'AFTER update temp table has {self.count_rows(self.TEMP_TABLE)} rows')
-
-            print('now starting target table update...')
+            self.upload_to_temporary_table(self._detected_ethnicities, self.TEMP_TABLE)
 
             if self.exists(self.TARGET_TABLE):
 
-                print(f'target table {self.TARGET_TABLE} exists and has {self.count_rows(self.TARGET_TABLE)} rows') 
-
-                print(f"merging with {self.TEMP_TABLE}..")
-
-                # self.sess.execute(text(f"""
-                #                 MERGE {self.TARGET_TABLE} AS TARGET
-                #                 USING {self.TEMP_TABLE} AS SOURCE
-                #                 ON TARGET.CustomerID = SOURCE.CustomerID
-                #                 WHEN MATCHED AND (TARGET.Ethnicity <> SOURCE.Ethnicity)
-                #                 THEN
-                #                 UPDATE
-                #                 SET TARGET.Ethnicity = SOURCE.Ethnicity, TARGET.AssignedOn = SOURCE.AssignedOn
-                #                 WHEN NOT MATCHED BY TARGET
-                #                 THEN
-                #                 INSERT (CustomerID, Ethnicity, AssignedOn)
-                #                 VALUES (SOURCE.CustomerID, SOURCE.Ethnicity, SOURCE.AssignedOn);
-                #                 """))
+                print(f'currently, table {self.TARGET_TABLE} has {self.count_rows(self.TARGET_TABLE)} rows') 
 
                 self.sess.execute(f"""DELETE FROM {self.TARGET_TABLE}
                                         WHERE 
                                         {self.CUSTID} IN 
                                         (SELECT {self.CUSTID} FROM {self.TEMP_TABLE})""")
-                print(f'deleted some customer ids from target, left rows: {self.count_rows(self.TARGET_TABLE)}')
+
+                print(f'rows to remain unchanged: {self.count_rows(self.TARGET_TABLE)}') 
 
                 self.sess.execute(f"""
                             INSERT INTO {self.TARGET_TABLE} ({self.CUSTID}, FullName, Ethnicity, AssignedOn)
                             SELECT {self.CUSTID}, FullName, Ethnicity, AssignedOn 
                             FROM
                             {self.TEMP_TABLE};
-                    """)
+                            """)
 
-                print(f'target table {self.TARGET_TABLE} now has {self.count_rows(self.TARGET_TABLE)} rows')
+                print(f'rows after update: {self.count_rows(self.TARGET_TABLE)}') 
 
             else:
 
                 print(f'target table {self.TARGET_TABLE} doesn\'t exist. attempting to create...')
 
                 self.sess.execute(f"""  CREATE TABLE {self.TARGET_TABLE} 
-                                        ({self.CUSTID} int, FullName nvarchar(200), Ethnicity nvarchar(200), AssignedOn nvarchar(200))
+                                        ({self.CUSTID} int, FullName varchar(100), Ethnicity varchar(50), AssignedOn nvarchar(20))
                                     """)
                 print(f'inserting new values into target table...')
                 
@@ -292,32 +314,15 @@ class TableHandler(object):
                                     """)
                 print(f'target table {self.TARGET_TABLE} now has {self.count_rows(self.TARGET_TABLE)} rows')
                   
-            
-            print("update completed. elapsed time: {:.0f} min {:.0f} sec".format(*divmod(time.time() - t_start, 60)))
     
     def send_email_sns(self):
-
-        # client = boto3.client('sns', **self.S3_CREDENTIALS)
-        # REGION = 'ap-southeast-2'
 
         self.TOPIC_ARN = [l.strip() for l in open('config/arn.txt','r').readlines() if l.strip()].pop()
 
         boto3.client('sns', **self.S3_CREDENTIALS).publish(TopicArn=self.TOPIC_ARN,
                                                 Subject='new ethnicities', 
                                                     Message='Today\'s ethnicity update: we have identified {} customer IDs with ethnic names!\nThis is for the last {} days.\nNot bad.'.format(len(self._detected_ethnicities), self.DAYS))
-        _html = """<html>
-                <head>
-                 <title>Ethnicities</title>
-                </head
-                <body>
-                <h1>Todays Catchment!</h1>
-                 <p>detailed description here...</p>
-                </body>
-                </html>"""
 
-        boto3.client('sns', **self.S3_CREDENTIALS).publish(TopicArn=self.TOPIC_ARN,
-                                                Subject='and now HTML ethnicities', 
-                                                    Message=_html)
 
     def send_email(self):
 
@@ -426,11 +431,14 @@ if __name__ == '__main__':
     tc = TableHandler(**json.load(open("config/conn-02.ini", "r")), 
                         src_table='DWSales.dbo.tbl_LotusCustomer',
                         target_table='TEGA.dbo.CustomerEthnicities_UPDATED',
-                        years=23)
+                        temp_table='TEGA.dbo.some_temptable',
+                        days=12)
 
-    tc.proc_new_customers()
+    tc.get_new_rows()
 
+    # setup multiprocessing
     AVAIL_CPUS = multiprocessing.cpu_count()
+    print(f'available CPUs: {AVAIL_CPUS}')
 
     ncust = len(tc._CUST_TO_CHECK)
 
@@ -444,39 +452,19 @@ if __name__ == '__main__':
 
         dfs = []
 
-        for start in range(0, num_chunks):
+        for start in range(0, num_chunks + (extra > 0)):
 
-            print(f'rows {start*chunk_size} to {(start+1)*chunk_size}...')
+            from_ = start*chunk_size
+            to_ = from_ + chunk_size
 
-            print(f'available CPUs: {AVAIL_CPUS}. creating a pool...', end='')
+            print(f'rows {from_} to {to_}...')
+
             pool = multiprocessing.Pool(AVAIL_CPUS)
-            print('ok')
 
-            b = tc._CUST_TO_CHECK.iloc[start*chunk_size:(start+1)*chunk_size,:]
+            b = tc._CUST_TO_CHECK.iloc[from_:to_,:]
 
             res = np.vstack(pool.map(get_array_ethnicity, 
-                                np.array_split(b.values, AVAIL_CPUS)))
-
-            pool.close()
-            pool.join()
-
-            dfs.append(pd.DataFrame(res,
-                                columns=["CustomerID", "FullName", "Ethnicity"],
-                                dtype=str).query('Ethnicity != "None"'))
-            
-
-        if extra:
-
-            print(f'rows {num_chunks*chunk_size} to the last one...')
-
-            print(f'available CPUs: {AVAIL_CPUS}. creating a pool...', end='')
-            pool = multiprocessing.Pool(AVAIL_CPUS)
-            print('ok')
-
-            b = tc._CUST_TO_CHECK.iloc[num_chunks*chunk_size:,:]
-
-            res = np.vstack(pool.map(get_array_ethnicity, 
-                                np.array_split(b.values, AVAIL_CPUS)))
+                                    np.array_split(b.values, AVAIL_CPUS)))
 
             pool.close()
             pool.join()
@@ -489,9 +477,7 @@ if __name__ == '__main__':
 
     else:
 
-        print(f'available CPUs: {AVAIL_CPUS}. creating a pool...', end='')
         pool = multiprocessing.Pool(AVAIL_CPUS)
-        print('ok')
 
         tc._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(get_array_ethnicity, 
             np.array_split(tc._CUST_TO_CHECK.values, AVAIL_CPUS))),
@@ -502,11 +488,13 @@ if __name__ == '__main__':
         pool.join()
 
     
-
+    # convert CustomerID to int
     tc._detected_ethnicities['CustomerID'] = tc._detected_ethnicities['CustomerID'].astype(int)
+    # add timestamp
     tc._detected_ethnicities["AssignedOn"] = tc.TODAY_SYD
 
-    print(f'total rows with ethnicity: {len(tc._detected_ethnicities)}') 
+    print(f'ethnic rows: {len(tc._detected_ethnicities)}') 
 
     tc.update_ethnicity_table()
+
     tc.send_email_jinja()
