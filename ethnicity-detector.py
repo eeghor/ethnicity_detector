@@ -22,6 +22,7 @@ from jinja2 import Environment, FileSystemLoader
 import pymssql
 
 import sys
+import os
 
 import multiprocessing
 
@@ -262,6 +263,8 @@ class TableHandler(object):
                                             """,
                                             self._ENGINE)
 
+        print(f'now rows: {len(self._CUST_TO_CHECK)}')
+
         return self
     
     
@@ -406,12 +409,19 @@ class TableHandler(object):
 
             p = d[f'eth{i}']
 
-            fp = open(f'templates/img/{p}.png', 'rb')
+            flag_pic = f'img/{p}.png'
+
+            if not os.path.exists(f'templates/{flag_pic}'):
+                flag_pic = 'img/australian.png'
+
+            flag_pic_full = f'templates/{flag_pic}'
+
+            fp = open(flag_pic_full, 'rb')
             msg_img = MIMEImage(fp.read())
             fp.close()
     
-            msg_img.add_header('Content-ID', f'<img/{p}.png>')
-            msg_img.add_header('Content-Disposition', 'inline', filename=f'img/{p}.png')
+            msg_img.add_header('Content-ID', f'<{flag_pic}>')
+            msg_img.add_header('Content-Disposition', 'inline', filename=f'{flag_pic}')
     
             email.attach(msg_img)
 
@@ -430,71 +440,75 @@ if __name__ == '__main__':
 
     tc = TableHandler(**json.load(open("config/conn-02.ini", "r")), 
                         src_table='DWSales.dbo.tbl_LotusCustomer',
-                        target_table='TEGA.dbo.CustomerEthnicities_UPDATED',
+                        target_table='TEGA.dbo.CustomerEthnicities',
                         temp_table='TEGA.dbo.some_temptable',
-                        days=12)
+                        days=1)
 
     tc.get_new_rows()
 
-    # setup multiprocessing
-    AVAIL_CPUS = multiprocessing.cpu_count()
-    print(f'available CPUs: {AVAIL_CPUS}')
-
     ncust = len(tc._CUST_TO_CHECK)
 
-    if ncust > 9000000:
-
-        chunk_size = 1000000
-
-        num_chunks, extra = divmod(ncust, chunk_size)
-
-        print(f'full chunks: {num_chunks}, extra rows: {extra}')
-
-        dfs = []
-
-        for start in range(0, num_chunks + (extra > 0)):
-
-            from_ = start*chunk_size
-            to_ = from_ + chunk_size
-
-            print(f'rows {from_} to {to_}...')
-
+    if ncust:
+        # setup multiprocessing
+        AVAIL_CPUS = multiprocessing.cpu_count()
+        print(f'available CPUs: {AVAIL_CPUS}')        
+    
+        if ncust > 9000000:
+    
+            chunk_size = 1000000
+    
+            num_chunks, extra = divmod(ncust, chunk_size)
+    
+            print(f'full chunks: {num_chunks}, extra rows: {extra}')
+    
+            dfs = []
+    
+            for start in range(0, num_chunks + (extra > 0)):
+    
+                from_ = start*chunk_size
+                to_ = from_ + chunk_size
+    
+                print(f'rows {from_} to {to_}...')
+    
+                pool = multiprocessing.Pool(AVAIL_CPUS)
+    
+                b = tc._CUST_TO_CHECK.iloc[from_:to_,:]
+    
+                res = np.vstack(pool.map(get_array_ethnicity, 
+                                        np.array_split(b.values, AVAIL_CPUS)))
+    
+                pool.close()
+                pool.join()
+    
+                dfs.append(pd.DataFrame(res,
+                                    columns=["CustomerID", "FullName", "Ethnicity"],
+                                    dtype=str).query('Ethnicity != "None"'))
+    
+            tc._detected_ethnicities = pd.concat(dfs)
+    
+        else:
+    
             pool = multiprocessing.Pool(AVAIL_CPUS)
-
-            b = tc._CUST_TO_CHECK.iloc[from_:to_,:]
-
-            res = np.vstack(pool.map(get_array_ethnicity, 
-                                    np.array_split(b.values, AVAIL_CPUS)))
-
+    
+            tc._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(get_array_ethnicity, 
+                np.array_split(tc._CUST_TO_CHECK.values, AVAIL_CPUS))),
+                        columns=["CustomerID", "FullName", "Ethnicity"],
+                        dtype=str).query('Ethnicity != "None"')
+    
             pool.close()
             pool.join()
+    
+    
+        # convert CustomerID to int
+        tc._detected_ethnicities['CustomerID'] = tc._detected_ethnicities['CustomerID'].astype(int)
+        # add timestamp
+        tc._detected_ethnicities["AssignedOn"] = tc.TODAY_SYD
+    
+        print(f'ethnic rows: {len(tc._detected_ethnicities)}') 
 
-            dfs.append(pd.DataFrame(res,
-                                columns=["CustomerID", "FullName", "Ethnicity"],
-                                dtype=str).query('Ethnicity != "None"'))
+        tc.update_ethnicity_table()
 
-        tc._detected_ethnicities = pd.concat(dfs)
+        tc.send_email_jinja()
 
     else:
-
-        pool = multiprocessing.Pool(AVAIL_CPUS)
-
-        tc._detected_ethnicities = pd.DataFrame(np.vstack(pool.map(get_array_ethnicity, 
-            np.array_split(tc._CUST_TO_CHECK.values, AVAIL_CPUS))),
-                    columns=["CustomerID", "FullName", "Ethnicity"],
-                    dtype=str).query('Ethnicity != "None"')
-
-        pool.close()
-        pool.join()
-
-    
-    # convert CustomerID to int
-    tc._detected_ethnicities['CustomerID'] = tc._detected_ethnicities['CustomerID'].astype(int)
-    # add timestamp
-    tc._detected_ethnicities["AssignedOn"] = tc.TODAY_SYD
-
-    print(f'ethnic rows: {len(tc._detected_ethnicities)}') 
-
-    tc.update_ethnicity_table()
-
-    tc.send_email_jinja()
+        print('no new customers today, nothing to do..')

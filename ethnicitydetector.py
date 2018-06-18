@@ -6,6 +6,8 @@ from collections import defaultdict
 from string import ascii_lowercase
 
 import os
+import sqlalchemy as sa
+from sqlalchemy.orm.session import sessionmaker
 
 class EthnicityDetector(object):
 
