@@ -1,18 +1,8 @@
 import pandas as pd
 import json
-import time
-import arrow
-
 from tablehandler import TableHandler
 from ethnicity import Ethnicity
-
 from collections import defaultdict, Counter
-from unidecode import unidecode
-
-from string import ascii_lowercase
-
-import sqlalchemy as sa
-from sqlalchemy.orm.session import sessionmaker
 
 # for sending an email notification:
 import smtplib
@@ -22,17 +12,8 @@ from email.mime.multipart import MIMEMultipart
 
 from jinja2 import Environment, FileSystemLoader
 
-import pymssql
-
-import sys
 import os
-
 import multiprocessing
-
-import numpy as np
-
-from ethnicitydetector import EthnicityDetector
-
 import boto3
 
 
@@ -58,10 +39,20 @@ def split_df(df, chunks=2):
 
 def get_ethn(x):
 
-	print(x[x['FullName'].astype(str) == 'nan'])
+	print('nan fullnames obtained by get_ethn:')
+	print(len(x[x['FullName'].astype(str) == 'nan']))
+
+	for col in 'CustomerID FullName'.split():
+		assert col in x.columns, print(f'No {col} column found!')
 
 	_ = pd.concat([x[['CustomerID']], e.get(x['FullName'].tolist())[['Name', 'Ethnicity']]], axis=1, ignore_index=True)
+
 	_.columns = 'CustomerID CleanCustomerName Ethnicity'.split()
+	
+	print('nan CleanCustomerNames:')
+	print(len(_[_['CleanCustomerName'].astype(str) == 'nan']))
+
+	
 	_ = _[_['CustomerID'].notnull()]
 
 	_['CustomerID'] = _['CustomerID'].astype(int)
@@ -196,11 +187,11 @@ if __name__ == '__main__':
 	
   
 
-	tc.df2tab(allnew_ethnicities, 'TEGA.[tt\\igork].CustomerEthnicities_temp')
+	# tc.df2tab(allnew_ethnicities, 'TEGA.[tt\\igork].CustomerEthnicities_temp')
 
-	tc.tmp2tab('TEGA.[tt\\igork].CustomerEthnicities_temp', 'TEGA.[tt\\igork].CustomerEthnicities_testing')
+	# tc.tmp2tab('TEGA.[tt\\igork].CustomerEthnicities_temp', 'TEGA.[tt\\igork].CustomerEthnicities_testing')
 
-	tc.close_session()
+	# tc.close_session()
 
 	# send_email_jinja(allnew_ethnicities)
 	# send_email_sns(allnew_ethnicities)

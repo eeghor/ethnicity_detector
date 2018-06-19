@@ -1,9 +1,6 @@
 import re
 import json
 import time
-
-# from ethnicity import Ethnicity
-
 import arrow
 import os
 import sys
@@ -218,26 +215,4 @@ class TableHandler(object):
 
 		print(f'rows after update: {self.count_rows(tab)}')
 
-		return self                
-	
-if __name__ == '__main__':
-
-	tc = TableHandler(days=1).start_session(sqlcredsfile="config/conn-01.ini")
-
-	newcids = tc.get_new_cids('DWSales.dbo.tbl_LotusCustomer')
-
-	if len(newcids) > 0:
-
-		e = Ethnicity().make_dicts()
-
-		newcids = pd.concat([newcids[['CustomerID']], e.get(newcids['FullName'].tolist())[['Name', 'Ethnicity']]], 
-								axis=1, ignore_index=True)
-		newcids.columns = 'CustomerID CleanCustomerName Ethnicity'.split()
-
-	print(newcids.head())
-
-	tc.df2tab(newcids, 'TEGA.[tt\\igork].CustomerEthnicities_temp')
-
-	tc.tmp2tab('TEGA.[tt\\igork].CustomerEthnicities_temp', 'TEGA.[tt\\igork].CustomerEthnicities_testing')
-
-	tc.close_session()
+		return self
