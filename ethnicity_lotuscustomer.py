@@ -77,14 +77,14 @@ def get_ethnicity_parallel(x):
 if __name__ == '__main__':
 
 	LTUS_TAB = 'DWSales.dbo.tbl_LotusCustomer'
-	TEMP_TAB = 'TEGA.[tt\\igork].CustomerEthnicities_temp'
-	ETHN_TAB = 'TEGA.[tt\\igork].CustomerEthnicities_testing'
+	TEMP_TAB = 'TEGA.dbo.CustomerEthnicities_temp'
+	ETHN_TAB = 'TEGA.dbo.CustomerEthnicities'
 
-	tc = TableHandler(years=0.02).start_session(sqlcredsfile="config/rds.txt")
+	tc = TableHandler(years=20).start_session(sqlcredsfile="config/rds.txt")
 	
 	e = Ethnicity().make_dicts()
 
-	MAX_NO_SUBSPLIT = 20000
+	MAX_NO_SUBSPLIT = 50000
 	INTO_CHUNKS = 10
 
 	newcids = tc.get_new_cids(LTUS_TAB)
@@ -144,9 +144,6 @@ if __name__ == '__main__':
 								template_maps=d, 
 								table_ref=f'see table {ETHN_TAB} for details', 
 								creds_loc='env')
-		# ee.send_email_jinja(allnew_ethnicities, comment=f'see table {ETHN_TAB} for details')
-		# ee.send_sns(send_what='error', msg='I can\'t grab new customers from LotusCustomer! You need to fix this!', s3credsfile='config/creds-s3.json')
-
 
 	else:
 
