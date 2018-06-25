@@ -9,23 +9,24 @@ import sqlalchemy
 from sqlalchemy.orm.session import sessionmaker
 
 def timer(func):
-
+	"""
+	decorator to time (table handling) functions/methods
+	"""
 	def wrapper(*args, **kwargs):
 
 		t_start = time.time()
 		res = func(*args, **kwargs)
-		print("method: {} # elapsed time: {:.0f} m {:.0f}s".format(func.__name__, 
-				*divmod(time.time() - t_start, 60)))
+		print("{} done in {:.0f} m {:.0f}s".format(func.__name__,  *divmod(time.time() - t_start, 60)))
 		return res
 
 	return wrapper
 
-class TableHandler(object):
+class TableHandler:
 	
 	"""
-	Class to connect to tables and get or upload stuff from/to tables
+	class to connect to tables and get or upload stuff from/to tables
 	"""
-	def __init__(self, email=None, **kwargs):
+	def __init__(self, **kwargs):
 
 		# we works in days so convert years to days if years are specified
 		if 'days' in kwargs:
@@ -33,7 +34,15 @@ class TableHandler(object):
 		elif 'years' in kwargs:
 			self.DAYS = int(round(kwargs['years']*365,0))
 		else:
-			raise KeyError('you forgot to provide the days or years argument!')
+			raise KeyError('TableHandler: you forgot to provide the days or years argument!')
+
+		print(f'starting to collect new customers for the last {self.DAYS} days...')
+
+		# describe the ethnicity table here
+		self.ETHNICITY_COLS_AND_TYPES = [('CustomerID', 'INT NOT NULL'),
+											('CleanCustomerName', 'VARCHAR(200)'), 
+											('Ethnicity', 'VARCHAR(50)'), 
+											('AssignedOn', 'VARCHAR(20)')]
 
 	def start_session(self, sqlcredsfile):
 
@@ -104,16 +113,20 @@ class TableHandler(object):
 
 			print(f'dropped {tab}...')
 
-		if set(df.columns) != set('CustomerID CleanCustomerName Ethnicity'.split()):
-			raise ValueError(f'[df2tab]: data frame must have columns named CustomerID, CleanCustomerName and Ethnicity!')
+		req_colnames = [t[0] for t in self.ETHNICITY_COLS_AND_TYPES[:-1]]
+
+		if set(df.columns) != set(req_colnames):
+			raise ValueError(f'[df2tab]: data frame must have the following columns: {", ".join(req_colnames)}!')
 
 		timestamp_ = arrow.utcnow().to('Australia/Sydney').format("YYYY-MM-DD")
 
 		# now create new temporary table
 
-		self.sess.execute(f'CREATE TABLE {tab} (CustomerID int NOT NULL, CleanCustomerName varchar(200), Ethnicity varchar(50), AssignedOn varchar(20))')
+		self.sess.execute(f'CREATE TABLE {tab} ({",".join([" ".join(t) for t in self.ETHNICITY_COLS_AND_TYPES])})')
 
 		print(f'created {tab}...')
+
+		rows_ = len(df)
 
 		_MAX_ROWS = 1000
 
@@ -122,9 +135,7 @@ class TableHandler(object):
 
 		print(f'uploading data frame to {tab} by {_MAX_ROWS} rows...')
 
-		for i in range(divmod(len(df), _MAX_ROWS)[0] + 1):
-			
-			print(f'rows: {_MAX_ROWS*i} - {_MAX_ROWS*(i+1)}..')
+		for i in range(divmod(rows_, _MAX_ROWS)[0] + 1):
 
 			vals_ = []
 
@@ -136,9 +147,12 @@ class TableHandler(object):
 
 				vals_.append('(' + str(r[1]['CustomerID']) + ',' + "'" + r[1]['CleanCustomerName'].replace("'","''") + "'" + ',' + "'" + r[1]['Ethnicity'] + "'" + ',' + "'" + timestamp_ + "'" + ')')
 
-			self.sess.execute(f' INSERT INTO  {tab} (CustomerID, CleanCustomerName, Ethnicity, AssignedOn) VALUES {",".join(vals_)}')
+			self.sess.execute(f'INSERT INTO  {tab} ({", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])}) VALUES {",".join(vals_)}')
 
-		print('done')
+			if (i + 1) % 20 == 0:
+				print(f'uploaded rows: {_MAX_ROWS*(i+1)} ({100*_MAX_ROWS*(i+1)/rows_:.1f}%)')
+
+		print('finished uploading')
 
 		return self
 
@@ -158,8 +172,6 @@ class TableHandler(object):
 		print(f'date in Sydney: {_today_ts.format("YYYY-MM-DD")}')
 
 		_days_ago_ts = _today_ts.shift(days=-self.DAYS)
-
-		# self.BETWEEN_DAYS = f'BETWEEN \'{_days_ago_ts.format("YYYYMMDD")}\' AND \'{_today_ts.format("YYYYMMDD")}\''
 
 		new_customerIDs = pd.read_sql(f"""
 											SELECT CustomerID,
@@ -184,6 +196,10 @@ class TableHandler(object):
 	
 	@timer
 	def tmp2tab(self, tmp_tab, tab):
+		"""
+		copy the contents of a temporary table tmp_tab into a table tab;
+		then drop tmp_tab 
+		"""
 		
 		if not self.exists(tmp_tab):
 			raise Exception(f'temporary table {tmp_tab} doesn\'t exist!')
@@ -195,24 +211,26 @@ class TableHandler(object):
 		if not self.exists(tab):
 
 			self.sess.execute(f""" CREATE TABLE {tab} 
-									(CustomerID int NOT NULL, 
-									CleanCustomerName varchar(200), Ethnicity varchar(50), AssignedOn nvarchar(20))
+									({", ".join([" ".join(t) for t in self.ETHNICITY_COLS_AND_TYPES])})
 								""")
 
 			print(f'created table {tab}...')
 
-		print(f'table {tab} has {self.count_rows(tab)} rows...') 
+		print(f'table {tab} has {self.count_rows(tab):,} rows...') 
 
 		self.sess.execute(f"""DELETE FROM {tab} WHERE CustomerID IN 
 										(SELECT CustomerID FROM {tmp_tab})""")
 
 		self.sess.execute(f"""
-							INSERT INTO {tab} (CustomerID, CleanCustomerName, Ethnicity, AssignedOn)
-							SELECT CustomerID, CleanCustomerName, Ethnicity, AssignedOn 
+							INSERT INTO {tab} ({", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])})
+							SELECT {", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])} 
 							FROM
 							{tmp_tab};
 							""")
 
-		print(f'rows after update: {self.count_rows(tab)}')
+		self.sess.execute(f'DROP TABLE {tmp_tab}')
+		print(f'dropped temporary table {tmp_tab}')
+
+		print(f'rows after update: {self.count_rows(tab):,}')
 
 		return self
