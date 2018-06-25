@@ -143,7 +143,7 @@ if __name__ == '__main__':
 		ee.send_email_jinja(subj=f'[ethnicity update]: {len(allnew_ethnicities):,} new', 
 								template_maps=d, 
 								table_ref=f'see table {ETHN_TAB} for details', 
-								creds_loc='env')
+								creds_loc='local')
 
 	else:
 
