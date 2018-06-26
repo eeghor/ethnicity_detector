@@ -39,10 +39,9 @@ class TableHandler:
 		print(f'starting to collect new customers for the last {self.DAYS} days...')
 
 		# describe the ethnicity table here
-		self.ETHNICITY_COLS_AND_TYPES = [('CustomerID', 'INT NOT NULL'),
-											('CleanCustomerName', 'VARCHAR(200)'), 
-											('Ethnicity', 'VARCHAR(50)'), 
-											('AssignedOn', 'VARCHAR(20)')]
+		self.ETHNICITY_COLS_AND_TYPES = [('CustomerID', 'INT NOT NULL'), ('CleanCustomerName', 'VARCHAR(200)'), 
+											('Ethnicity', 'VARCHAR(50)'), ('AssignedOn', 'VARCHAR(20)')]
+		self.COL_NAMES = 'CustomerID CleanCustomerName Ethnicity AssignedOn'.split()
 
 	def start_session(self, sqlcredsfile):
 
@@ -106,7 +105,6 @@ class TableHandler:
 		"""
 
 		# does the target table even exist? if it does, drop it
-
 		if self.exists(tab):
 
 			self.sess.execute(f'DROP TABLE {tab}')
@@ -145,9 +143,13 @@ class TableHandler:
 				# https://social.msdn.microsoft.com/Forums/sqlserver/en-US/b2443854-5f02-4ebe-ad8d-61725a95b2bf/
 				# forum-faq-how-do-i-use-double-quotes-and-single-quotes-when-building-a-query-string?forum=sqldataaccess
 
-				vals_.append('(' + str(r[1]['CustomerID']) + ',' + "'" + r[1]['CleanCustomerName'].replace("'","''") + "'" + ',' + "'" + r[1]['Ethnicity'] + "'" + ',' + "'" + timestamp_ + "'" + ')')
+				cid_ = str(r[1]['CustomerID'])
+				nam_ = r[1]['CleanCustomerName'].replace("'","''")
+				eth_ = r[1]['Ethnicity']
 
-			self.sess.execute(f'INSERT INTO  {tab} ({", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])}) VALUES {",".join(vals_)}')
+				vals_.append(f'({cid_},\'{nam_}\',\'{eth_}\',\'{timestamp_}\')')
+
+			self.sess.execute(f'INSERT INTO  {tab} ({", ".join(self.COL_NAMES)}) VALUES {", ".join(vals_)}')
 
 			if (i + 1) % 20 == 0:
 				print(f'uploaded rows: {_MAX_ROWS*(i+1)} ({100*_MAX_ROWS*(i+1)/rows_:.1f}%)')
@@ -189,8 +191,6 @@ class TableHandler:
 											""",
 											self._ENGINE)
 
-		print(f'new rows: {len(new_customerIDs)}')
-
 		return new_customerIDs
 	
 	
@@ -222,8 +222,8 @@ class TableHandler:
 										(SELECT CustomerID FROM {tmp_tab})""")
 
 		self.sess.execute(f"""
-							INSERT INTO {tab} ({", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])})
-							SELECT {", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])} 
+							INSERT INTO {tab} ({", ".join(self.COL_NAMES)})
+							SELECT {", ".join(self.COL_NAMES)} 
 							FROM
 							{tmp_tab};
 							""")

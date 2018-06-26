@@ -41,14 +41,18 @@ def split_df(df, chunks=2):
 	return [df.iloc[i*rows_in_chunk:(i+1)*rows_in_chunk] for i in range(chunks + (rows_left > 0))]
 
 def get_ethnicity_dataframe(x):
+	"""
+	data frame x must have columns called CustomerID and FullName; detect ethnicities for every name and
+	return a data frame with columns CustomerID, CleanCustomerName, Ethnicity
+	"""
 
 	for col in 'CustomerID FullName'.split():
 		if not col in x.columns:
 			raise NameError(f'No {col} column found!')
 
-	_ = pd.concat([x[['CustomerID']].reset_index(drop=True), e.get(x['FullName'].tolist()).reset_index(drop=True)], axis=1)
-
-	_.columns = 'CustomerID CleanCustomerName Ethnicity'.split()
+	_ = pd.concat([x[['CustomerID']].reset_index(drop=True), 
+			e.get(x['FullName'].tolist()).reset_index(drop=True)], axis=1) \
+				.rename(columns={'Name': 'CleanCustomerName'})['CustomerID CleanCustomerName Ethnicity'.split()]
 
 	_['CustomerID'] = _['CustomerID'].astype(int)
 	_['CleanCustomerName'] = _['CleanCustomerName'].astype(str)
@@ -73,6 +77,16 @@ def get_ethnicity_parallel(x):
 
 	return res
 
+def create_jinja_mapping(x):
+
+	d = defaultdict()
+	
+	for i, t in enumerate(Counter(x['Ethnicity']).most_common()[:3], 1):
+
+		d[f'eth{i}'] = t[0]
+		d[f'eth{i}_n'] = f'{t[1]:,}'
+
+	return d
 
 if __name__ == '__main__':
 
@@ -97,7 +111,7 @@ if __name__ == '__main__':
 
 			n = newrows_ // INTO_CHUNKS  # chunk size
 
-			print(f'new rows {newrows_:,} > {MAX_NO_SUBSPLIT:,}, split dataframe into {INTO_CHUNKS:,} chunks ({n} rows each)...')
+			print(f'new rows {newrows_:,} > {MAX_NO_SUBSPLIT:,}, split data frame into {INTO_CHUNKS:,} chunks ({n} rows each)...')
 	
 			num_chunks, extra = divmod(newrows_, n)
 	
@@ -131,17 +145,8 @@ if __name__ == '__main__':
 
 		ee = EthnicityEmailer()
 
-		# create a mapping for the top 3 ethnicities for jinja template 
-
-		d = defaultdict()
-	
-		for i, t in enumerate(Counter(allnew_ethnicities['Ethnicity']).most_common()[:3], 1):
-
-			d[f'eth{i}'] = t[0]
-			d[f'eth{i}_n'] = f'{t[1]:,}'
-
 		ee.send_email_jinja(subj=f'[ethnicity update]: {len(allnew_ethnicities):,} new', 
-								template_maps=d, 
+								template_maps=create_jinja_mapping(allnew_ethnicities), 
 								table_ref=f'see table {ETHN_TAB} for details', 
 								creds_loc='local')
 
