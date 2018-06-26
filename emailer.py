@@ -8,7 +8,6 @@ from jinja2 import Environment, FileSystemLoader
 
 import os
 import json
-from collections import defaultdict, Counter
 
 import boto3
 
@@ -99,12 +98,6 @@ class EthnicityEmailer:
 			smtp_server = 'smtp.office365.com'
 			smpt_port = '587'
 
-		# d = defaultdict()
-	
-		# for i, t in enumerate(Counter(df['Ethnicity']).most_common()[:3], 1):
-
-		# 	d[f'eth{i}'] = t[0]
-		# 	d[f'eth{i}_n'] = f'{t[1]:,}'
 	
 		email = MIMEMultipart('related')   
 		

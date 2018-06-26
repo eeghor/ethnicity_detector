@@ -1,20 +1,9 @@
 import pandas as pd
-import json
 
 from ethnicity import Ethnicity
 from collections import defaultdict, Counter
 
-# for sending an email notification:
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
-from email.mime.multipart import MIMEMultipart
-
-from jinja2 import Environment, FileSystemLoader
-
-import os
 import multiprocessing
-import boto3
 
 from tablehandler import TableHandler
 from emailer import EthnicityEmailer
@@ -94,7 +83,7 @@ if __name__ == '__main__':
 	TEMP_TAB = 'TEGA.dbo.CustomerEthnicities_temp'
 	ETHN_TAB = 'TEGA.dbo.CustomerEthnicities'
 
-	tc = TableHandler(years=20).start_session(sqlcredsfile="config/rds.txt")
+	tc = TableHandler(days=1).start_session(sqlcredsfile="config/rds.txt")
 	
 	e = Ethnicity().make_dicts()
 
@@ -109,25 +98,18 @@ if __name__ == '__main__':
 
 		if newrows_ > MAX_NO_SUBSPLIT:
 
-			n = newrows_ // INTO_CHUNKS  # chunk size
+			rows_per_chunk = newrows_ // INTO_CHUNKS
 
-			print(f'new rows {newrows_:,} > {MAX_NO_SUBSPLIT:,}, split data frame into {INTO_CHUNKS:,} chunks ({n} rows each)...')
-	
-			num_chunks, extra = divmod(newrows_, n)
+			num_chunks, extra = divmod(newrows_, rows_per_chunk)
+
+			print(f'total {num_chunks} chunks {rows_per_chunk} rows each and {extra} extra rows')
 	
 			dfs = []
 	
 			for j in range(0, num_chunks + (extra > 0)):
-
-				from_ = j*n
-				to_ = from_ + n
 	
-				print(f'chunk {j}: rows {from_} to {to_}...')
-
-				res = get_ethnicity_parallel(newcids.iloc[from_:to_,:])
-	
-				dfs.append(res.query('Ethnicity != "---"'))
-
+				dfs.append(get_ethnicity_parallel(newcids.iloc[j*rows_per_chunk: (j+1)*rows_per_chunk,:])
+																					.query('Ethnicity != "---"'))
 	
 			allnew_ethnicities = pd.concat(dfs)
 
@@ -137,15 +119,12 @@ if __name__ == '__main__':
 
 		print(f'collected {len(allnew_ethnicities):,} new ethnic customer ids...')
   
-		tc.df2tab(allnew_ethnicities, TEMP_TAB)
-	
+		tc.dataframe2table(allnew_ethnicities, TEMP_TAB)
 		tc.tmp2tab(TEMP_TAB, ETHN_TAB)
 	
 		tc.close_session()
 
-		ee = EthnicityEmailer()
-
-		ee.send_email_jinja(subj=f'[ethnicity update]: {len(allnew_ethnicities):,} new', 
+		EthnicityEmailer().send_email_jinja(subj=f'[ethnicity update]: {len(allnew_ethnicities):,} new', 
 								template_maps=create_jinja_mapping(allnew_ethnicities), 
 								table_ref=f'see table {ETHN_TAB} for details', 
 								creds_loc='local')

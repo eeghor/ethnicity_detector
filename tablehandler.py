@@ -1,9 +1,6 @@
-import re
 import json
 import time
 import arrow
-import os
-import sys
 import pandas as pd
 import sqlalchemy
 from sqlalchemy.orm.session import sessionmaker
@@ -41,9 +38,10 @@ class TableHandler:
 		# describe the ethnicity table here
 		self.ETHNICITY_COLS_AND_TYPES = [('CustomerID', 'INT NOT NULL'), ('CleanCustomerName', 'VARCHAR(200)'), 
 											('Ethnicity', 'VARCHAR(50)'), ('AssignedOn', 'VARCHAR(20)')]
-		self.COL_NAMES = 'CustomerID CleanCustomerName Ethnicity AssignedOn'.split()
 
 	def start_session(self, sqlcredsfile):
+
+		print('starting sqlalchemy session...', end='')
 
 		sql_creds = json.load(open(sqlcredsfile))
 
@@ -60,8 +58,8 @@ class TableHandler:
 		# create a session
 		self.sess = self._SESSION()
 
-		print('successfully started sqlalchemy session...')
-
+		print('ok')
+		
 		return self
 
 	def close_session(self):
@@ -98,7 +96,7 @@ class TableHandler:
 		return self.sess.execute(f'SELECT COUNT (*) FROM {tab};').fetchone()[0]
 				
 	@timer
-	def df2tab(self, df, tab):
+	def dataframe2table(self, df, tab):
 
 		"""
 		uploads table a pandas DataFrame df to a SQL table tab
@@ -114,7 +112,7 @@ class TableHandler:
 		req_colnames = [t[0] for t in self.ETHNICITY_COLS_AND_TYPES[:-1]]
 
 		if set(df.columns) != set(req_colnames):
-			raise ValueError(f'[df2tab]: data frame must have the following columns: {", ".join(req_colnames)}!')
+			raise ValueError(f'[dataframe2table]: data frame must have the following columns: {", ".join(req_colnames)}!')
 
 		timestamp_ = arrow.utcnow().to('Australia/Sydney').format("YYYY-MM-DD")
 
@@ -149,10 +147,10 @@ class TableHandler:
 
 				vals_.append(f'({cid_},\'{nam_}\',\'{eth_}\',\'{timestamp_}\')')
 
-			self.sess.execute(f'INSERT INTO  {tab} ({", ".join(self.COL_NAMES)}) VALUES {", ".join(vals_)}')
+			self.sess.execute(f'INSERT INTO  {tab} ({", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])}) VALUES {", ".join(vals_)}')
 
-			if (i + 1) % 20 == 0:
-				print(f'uploaded rows: {_MAX_ROWS*(i+1)} ({100*_MAX_ROWS*(i+1)/rows_:.1f}%)')
+			if (i + 1) % 40 == 0:
+				print(f'rows: {_MAX_ROWS*(i+1):,} ({100*_MAX_ROWS*(i+1)/rows_:.1f}%)')
 
 		print('finished uploading')
 
@@ -174,6 +172,8 @@ class TableHandler:
 		print(f'date in Sydney: {_today_ts.format("YYYY-MM-DD")}')
 
 		_days_ago_ts = _today_ts.shift(days=-self.DAYS)
+
+		print(f'new customers are those created or modified AT ANY TIME between {_days_ago_ts.format("YYYYMMDD")} and {_today_ts.format("YYYYMMDD")}')
 
 		new_customerIDs = pd.read_sql(f"""
 											SELECT CustomerID,
@@ -222,8 +222,8 @@ class TableHandler:
 										(SELECT CustomerID FROM {tmp_tab})""")
 
 		self.sess.execute(f"""
-							INSERT INTO {tab} ({", ".join(self.COL_NAMES)})
-							SELECT {", ".join(self.COL_NAMES)} 
+							INSERT INTO {tab} ({", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])})
+							SELECT {", ".join([t[0] for t in self.ETHNICITY_COLS_AND_TYPES])} 
 							FROM
 							{tmp_tab};
 							""")
